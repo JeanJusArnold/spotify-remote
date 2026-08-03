@@ -49,7 +49,7 @@ npm install
 
 You almost certainly don't need this, but `.env.example` documents one very specific workaround for a bug tied to one particular playlist — copy it to `.env` and fill in the value only if you actually hit that issue (see the file for details).
 
-`openbox-autostart.example` documents a full recommended session setup (virtual audio sink, launching Chromium, launching AudioRelay) as a copyable template for a dedicated session running just this project — copy it to `~/.config/openbox/autostart`. Install [AudioRelay](https://audiorelay.net) on your phone too and pair it with the desktop side, to actually hear what you're controlling.
+`openbox-autostart.example` documents a full recommended session setup (virtual audio sink, launching Chromium, launching AudioRelay) as a copyable template for a dedicated session running just this project — copy it to `~/.config/openbox/autostart`. Install [AudioRelay](https://audiorelay.net) on your phone too, to actually hear what you're controlling: open Tailscale to find the machine's Tailscale IP, then enter it in AudioRelay on your phone to connect.
 
 Start Chromium as shown above and log into Spotify, then:
 
