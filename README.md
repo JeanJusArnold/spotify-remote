@@ -14,7 +14,9 @@ Note also that this only *controls* playback — the audio itself plays wherever
 
 - `server.js` connects to a running Chromium instance over CDP (`chromium.connectOverCDP`) and drives the already-open Spotify Web Player tab with Playwright: reading the DOM to scrape your library/playlists/artists/albums, and clicking through the UI to navigate and search.
 - Transport commands (play/pause/next/previous) go straight to Chromium's MPRIS interface over D-Bus instead of clicking DOM buttons, for reliability.
-- A small static frontend (`public/`) is served by the same Express app and is meant to be opened from your phone's browser, on the same local network as the machine running the server.
+- A small static frontend (`public/`) is served by the same Express app, meant to be opened from your phone.
+
+**No built-in authentication**: there's no password or login, so don't expose this to the public internet (e.g. don't port-forward it). Use a private network like Tailscale to reach it remotely instead.
 
 **Language dependency**: some of the scraping logic matches specific French UI labels Spotify renders (e.g. "Discographie", "À suivre", "Titres likés"), because the author's own Spotify account is set to French. If your Spotify Web Player is in a different language, some features will silently fail to find what they're looking for. Adapting the string matches in `server.js` to another language should be straightforward if you want to try.
 
@@ -48,7 +50,7 @@ Start Chromium as shown above and log into Spotify, then:
 node server.js
 ```
 
-Open `http://<machine-ip>:3000` from your phone, on the same network.
+Open `http://<machine-ip>:3000` from your phone (over Tailscale or whatever private network reaches that machine).
 
 ## License
 
