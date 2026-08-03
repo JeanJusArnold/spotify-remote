@@ -1,6 +1,6 @@
 # Spotify Remote
 
-A phone-facing web remote for controlling Spotify running in a desktop browser: play/pause, skip, search, browse your library, artists, albums and playlists, all from a page you open on your phone.
+A phone-facing web remote for controlling Spotify running in a desktop browser: play/pause, skip, search, browse your library, artists, albums and playlists, all from a page you open on your phone. It comes with an optional companion setup for a dedicated, resource-conscious desktop session — including streaming that session's audio back to your phone too, via [AudioRelay](https://audiorelay.net) (see `openbox-autostart.example`).
 
 ## Disclaimer
 
@@ -8,13 +8,12 @@ This is a personal project, **not affiliated with or endorsed by Spotify**. It w
 
 Use at your own risk. There is no warranty (see [LICENSE](./LICENSE)), and Spotify could change their web player's markup at any time and break parts of this without notice.
 
-Note also that this only *controls* playback — the audio itself plays wherever Chromium is running (your desktop's speakers/output). Getting that audio onto your phone, if you want that, is a separate concern this project doesn't handle.
-
 ## How it works
 
 - `server.js` connects to a running Chromium instance over CDP (`chromium.connectOverCDP`) and drives the already-open Spotify Web Player tab with Playwright: reading the DOM to scrape your library/playlists/artists/albums, and clicking through the UI to navigate and search.
 - Transport commands (play/pause/next/previous) go straight to Chromium's MPRIS interface over D-Bus instead of clicking DOM buttons, for reliability.
 - A small static frontend (`public/`) is served by the same Express app, meant to be opened from your phone.
+- Getting that audio onto your phone is handled by [AudioRelay](https://audiorelay.net) (available on Flathub) — a separate app, on both the desktop and your phone, not something the remote's own page does. `openbox-autostart.example` documents the desktop side. This was landed on after trying a couple of DIY alternatives (a VLC/ffmpeg stream captured from a virtual sink, played through a browser `<audio>` tag) that turned out heavier on CPU, or came with real playback drawbacks (growing latency behind live audio, since a plain `<audio>` element can't skip ahead to "now" the way purpose-built low-latency protocols can) — AudioRelay just works better for this.
 
 **No built-in authentication**: there's no password or login, so don't expose this to the public internet (e.g. don't port-forward it). Use a private network like Tailscale to reach it remotely instead.
 
@@ -49,6 +48,8 @@ npm install
 ```
 
 You almost certainly don't need this, but `.env.example` documents one very specific workaround for a bug tied to one particular playlist — copy it to `.env` and fill in the value only if you actually hit that issue (see the file for details).
+
+`openbox-autostart.example` documents a full recommended session setup (virtual audio sink, launching Chromium, launching AudioRelay) as a copyable template for a dedicated session running just this project — copy it to `~/.config/openbox/autostart`. Install [AudioRelay](https://audiorelay.net) on your phone too and pair it with the desktop side, to actually hear what you're controlling.
 
 Start Chromium as shown above and log into Spotify, then:
 

@@ -1,0 +1,44 @@
+# Example autostart script for a dedicated session running this
+# project's Chromium instance. Written for Openbox (~/.config/openbox/autostart)
+# - a minimal window manager is the point of a dedicated session at all,
+# so there's little reason to reach for anything else here.
+
+# Wait for PipeWire to be ready
+until pactl info >/dev/null 2>&1; do
+    sleep 0.2
+done
+
+# A virtual sink, used below as AudioRelay's capture point - not just
+# a nice-to-have: AudioRelay was unreliable capturing straight from a
+# normal/default output in earlier testing, this dedicated null sink
+# is what made it work consistently. Nothing plays out of it on its
+# own otherwise
+# Create the virtual audio sink if it doesn't exist yet
+if ! pactl list short sinks | grep -q "spotify-remote-audio"; then
+    pactl load-module module-null-sink \
+        sink_name=spotify-remote-audio \
+        sink_properties=device.description=SpotifyRemoteAudio
+fi
+
+# Give PipeWire/WirePlumber a moment to finish initializing
+sleep 3
+
+# Route audio to the virtual sink
+pactl set-default-sink spotify-remote-audio
+pactl set-sink-volume spotify-remote-audio 75%
+
+# Launch the Chromium instance this project drives via CDP
+chromium-browser \
+  --user-data-dir="$HOME/.config/chromium-spotify" \
+  --remote-debugging-port=9222 \
+  --start-maximized &
+
+sleep 3
+
+# Getting that audio onto your phone is a separate concern from the
+# remote itself, but AudioRelay (https://audiorelay.net, available on
+# Flathub) is what this project actually uses for it - picked after
+# trying a few DIY alternatives (see the README) that all turned out
+# heavier or worse in practice. Install it first:
+#   flatpak install flathub net.audiorelay.AudioRelay
+flatpak run net.audiorelay.AudioRelay &
