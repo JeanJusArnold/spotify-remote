@@ -1,6 +1,6 @@
 # Spotify Remote
 
-A phone-facing web remote for controlling Spotify running in a desktop browser: play/pause, skip, search, browse your library, artists, albums and playlists, all from a page you open on your phone. It comes with an optional companion setup for a dedicated, resource-conscious desktop session — including streaming that session's audio back to your phone too, via [AudioRelay](https://audiorelay.net) (see `openbox-autostart.example`).
+A phone-facing web remote for controlling Spotify running in a desktop browser: play/pause, skip, search, browse your library, artists, albums and playlists, all from a page you open on your phone. It comes with an optional companion setup for a dedicated, resource-conscious desktop session — including streaming that session's audio back to your phone too.
 
 ## Disclaimer
 
