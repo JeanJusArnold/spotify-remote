@@ -4,7 +4,7 @@ A phone-facing web remote for controlling Spotify running in a desktop browser: 
 
 ## Disclaimer
 
-This is a personal project, **not affiliated with or endorsed by Spotify**. It works by remote-controlling an already-logged-in Chromium tab running Spotify's own Web Player (via the Chrome DevTools Protocol), reading and clicking through its page like a human would, plus sending standard media-key commands over D-Bus/MPRIS. It does not use any private or official Spotify API, and it very likely falls outside Spotify's Terms of Service for automated access to their client.
+This is a personal project, **not affiliated with or endorsed by Spotify**. It works by remote-controlling an already-logged-in Chromium tab running Spotify's own Web Player (via the Chrome DevTools Protocol), using surface-level inputs — clicks and keystrokes — plus standard media-key commands over D-Bus/MPRIS. It does not use any private or official Spotify API, and it very likely falls outside Spotify's Terms of Service for automated access to their client.
 
 Use at your own risk. There is no warranty (see [LICENSE](./LICENSE)), and Spotify could change their web player's markup at any time and break parts of this without notice.
 
