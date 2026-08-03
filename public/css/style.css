@@ -772,6 +772,17 @@ button:active {
 }
 
 
+.result-item.queued-flash {
+    animation:queued-flash 0.6s ease-out;
+}
+
+
+@keyframes queued-flash {
+    0% { background-color:rgba(29, 185, 84, 0.4); }
+    100% { background-color:transparent; }
+}
+
+
 .result-item img {
 
     width:40px;
@@ -809,6 +820,45 @@ button:active {
     overflow:hidden;
     text-overflow:ellipsis;
 
+}
+
+
+/* grows with its content (flex-basis:auto, the default) up to whatever
+   space is actually left in .container, pushing the "À suivre" section
+   down as it does - but flex-shrink:1 lets the flex algorithm compress
+   it instead of overflowing once there really isn't room left, at
+   which point #manualQueueList's own overflow-y:auto takes over so it
+   scrolls internally rather than the whole panel */
+#manualQueueSection {
+    display:none;
+    flex-direction:column;
+    flex-shrink:1;
+    min-height:0;
+    overflow:hidden;
+}
+
+
+#manualQueueSection.visible {
+    display:flex;
+}
+
+
+#manualQueueList {
+
+    flex:1;
+    min-height:0;
+    overflow-y:auto;
+    -webkit-overflow-scrolling:touch;
+    scrollbar-width:none;
+    -ms-overflow-style:none;
+
+    text-align:left;
+
+}
+
+
+#manualQueueList::-webkit-scrollbar {
+    display:none;
 }
 
 
@@ -904,6 +954,30 @@ button:active {
 }
 
 
+/* wraps the "À suivre" heading + list as one shrinkable/scrollable
+   unit, so when the manual queue above has grown enough to leave no
+   room at all, this whole section - heading included - scrolls out of
+   view instead of the heading always claiming its own guaranteed space */
+#queueSection {
+
+    display:flex;
+    flex-direction:column;
+
+    flex:1;
+    min-height:0;
+    overflow-y:auto;
+    -webkit-overflow-scrolling:touch;
+    scrollbar-width:none;
+    -ms-overflow-style:none;
+
+}
+
+
+#queueSection::-webkit-scrollbar {
+    display:none;
+}
+
+
 #queueList {
 
     flex:1;
@@ -920,4 +994,42 @@ button:active {
 
 #queueList::-webkit-scrollbar {
     display:none;
+}
+
+
+#trackActionSheet {
+
+    display:none;
+
+    position:fixed;
+    z-index:10;
+
+    background:#282828;
+    border-radius:6px;
+    box-shadow:0 4px 12px rgba(0,0,0,0.5);
+
+}
+
+
+#trackActionSheet.open {
+    display:block;
+}
+
+
+.track-action-option {
+
+    display:block;
+    width:100%;
+
+    padding:12px 16px;
+
+    background:transparent;
+    color:#fff;
+    border:none;
+
+    font-size:14px;
+    white-space:nowrap;
+    text-align:left;
+    cursor:pointer;
+
 }

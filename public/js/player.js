@@ -128,6 +128,22 @@ export async function updateState() {
 
 let lastQueueSignature = "";
 
+function createQueueRow(item) {
+
+    const row = document.createElement("div");
+    row.className = "result-item";
+
+    row.innerHTML =
+        '<img src="' + item.cover + '">' +
+        '<div class="result-info">' +
+        '<div class="result-title">' + item.title + '</div>' +
+        '<div class="result-artist">' + item.subtitle + '</div>' +
+        '</div>';
+
+    return row;
+
+}
+
 // the context name and the "up next" list both require the webplayer's
 // queue panel to be open to read - only called when the track changes
 // (see updateState), not on a fixed interval, and skipped entirely
@@ -145,10 +161,21 @@ async function refreshContextAndQueue() {
         document.getElementById("queueContext").innerText =
             data.context ? "(" + data.context + ")" : "";
 
-        const signature = JSON.stringify(data.queue);
+        const signature = JSON.stringify(data.queue) + "|" + JSON.stringify(data.manualQueue);
 
         if (signature === lastQueueSignature) return;
         lastQueueSignature = signature;
+
+        document.getElementById("manualQueueSection").classList.toggle(
+            "visible", data.manualQueue.length > 0
+        );
+
+        const manualQueueListEl = document.getElementById("manualQueueList");
+        manualQueueListEl.innerHTML = "";
+
+        data.manualQueue.forEach(item => {
+            manualQueueListEl.appendChild(createQueueRow(item));
+        });
 
         const queueListEl = document.getElementById("queueList");
 
@@ -156,15 +183,7 @@ async function refreshContextAndQueue() {
 
         data.queue.forEach((item, index) => {
 
-            const row = document.createElement("div");
-            row.className = "result-item";
-
-            row.innerHTML =
-                '<img src="' + item.cover + '">' +
-                '<div class="result-info">' +
-                '<div class="result-title">' + item.title + '</div>' +
-                '<div class="result-artist">' + item.subtitle + '</div>' +
-                '</div>';
+            const row = createQueueRow(item);
 
             row.addEventListener("click", async () => {
                 await api.playQueueItem(index);
@@ -273,6 +292,14 @@ export function hideSearchOverlay() {
     // polling is suspended while the overlay covers the player view -
     // refresh immediately so it isn't showing stale info for up to 2s
     updateState();
+    // updateState only refreshes the queue panel when the playing track
+    // itself changed - queueing a track from inside the overlay doesn't,
+    // so it'd otherwise never show up until the next track change. Only
+    // worth the extra request if a track was actually queued this visit
+    if (queuedWhileOverlayOpen) {
+        queuedWhileOverlayOpen = false;
+        refreshContextAndQueue();
+    }
 }
 
 function applyFallbackCovers(results, fallbackCover) {
@@ -286,27 +313,6 @@ let accumulatedTracks = [];
 function resetLoadMoreState() {
     accumulatedTracks = [];
     hideLoadMoreButton();
-}
-
-// consecutive pages overlap (the server scrolls by ~85% of the
-// viewport, not a full page), so a plain concat would show a few
-// tracks twice - this finds how much of the new batch is already at
-// the matching edge of what's accumulated and drops just that part
-function trimOverlapDown(existing, incoming) {
-
-    const maxK = Math.min(existing.length, incoming.length);
-
-    for (let k = maxK; k > 0; k--) {
-
-        const existingTail = existing.slice(existing.length - k).map(t => t.id).join(",");
-        const incomingHead = incoming.slice(0, k).map(t => t.id).join(",");
-
-        if (existingTail === incomingHead) return incoming.slice(k);
-
-    }
-
-    return incoming;
-
 }
 
 function resetAccumulated(tracks) {
@@ -369,6 +375,14 @@ async function loadMorePlaylistTracks() {
 
 let libraryLoadMoreType = "";
 
+// accumulatedTracks only ever holds the CURRENT view's tracks and gets
+// wiped by resetLoadMoreState() the moment the user browses into
+// anything else (e.g. tapping an artist) - so a full "Charger plus"
+// scan would otherwise be lost the instant you leave the view. This
+// keeps the full list around per library type so goBackInLibrary can
+// restore it directly instead of re-scraping just what's visible
+let libraryFullCache = {};
+
 async function loadMoreLibraryTracks() {
 
     hideLoadMoreButton();
@@ -378,8 +392,15 @@ async function loadMoreLibraryTracks() {
     try {
 
         await api.getLibraryMore(libraryLoadMoreType, signal, (chunk) => {
-            appendAccumulated(chunk.tracks);
+            // like /playlist-more, the server sends the whole,
+            // correctly-ordered list in one final chunk - replace
+            // outright rather than appending with overlap-trimming,
+            // which assumes incremental pages and would double up
+            // most of the list
+            resetAccumulated(chunk.tracks);
         });
+
+        libraryFullCache[libraryLoadMoreType] = { tracks: accumulatedTracks.slice(), atBottom: true };
 
         endAbortableLoad();
 
@@ -394,17 +415,122 @@ async function loadMoreLibraryTracks() {
 
 }
 
-function appendAccumulated(newTracks) {
+// browsable entities (artist/album/playlist/folder) navigate rather
+// than play, so "add to queue" only makes sense for the remaining
+// case: an actual track
+const BROWSABLE_TYPES = ["artist", "album", "playlist", "folder"];
 
-    const trimmed = trimOverlapDown(accumulatedTracks, newTracks);
-    accumulatedTracks = accumulatedTracks.concat(trimmed);
+const LONG_PRESS_MS = 500;
+const LONG_PRESS_MOVE_THRESHOLD = 10;
 
-    const resultsEl = document.getElementById("searchResults");
+// holding a result item opens the track action sheet instead of
+// playing it; a plain tap still plays as before. The click-suppression
+// listener below must be registered before the item's own click
+// handler (registration order decides firing order on the same
+// element - capture/bubble phase doesn't, since both are on the same
+// target) so it can swallow the click a long-press leaves behind
+function attachLongPress(element, onLongPress) {
 
-    for (const track of trimmed) {
-        resultsEl.appendChild(createResultItem(track));
+    let timer = null;
+    let startX = 0;
+    let startY = 0;
+    let firedLongPress = false;
+
+    function clearPress() {
+        clearTimeout(timer);
+        timer = null;
     }
 
+    element.addEventListener("pointerdown", (e) => {
+        startX = e.clientX;
+        startY = e.clientY;
+        timer = setTimeout(() => {
+            firedLongPress = true;
+            onLongPress();
+        }, LONG_PRESS_MS);
+    });
+
+    element.addEventListener("pointermove", (e) => {
+        if (!timer) return;
+        if (Math.abs(e.clientX - startX) > LONG_PRESS_MOVE_THRESHOLD || Math.abs(e.clientY - startY) > LONG_PRESS_MOVE_THRESHOLD) {
+            clearPress();
+        }
+    });
+
+    element.addEventListener("pointerup", clearPress);
+    element.addEventListener("pointerleave", clearPress);
+
+    element.addEventListener("click", (e) => {
+        if (firedLongPress) {
+            firedLongPress = false;
+            e.stopImmediatePropagation();
+            e.preventDefault();
+        }
+    });
+
+}
+
+let activeTrackResult = null;
+let activeTrackElement = null;
+let queuedWhileOverlayOpen = false;
+
+// closes on any tap outside the sheet - only listens while it's open,
+// attached in showTrackActionSheet rather than left registered all the
+// time, since the sheet is only relevant for the brief window it's shown
+function handleOutsideTrackActionTap(e) {
+    if (!document.getElementById("trackActionSheet").contains(e.target)) {
+        hideTrackActionSheet();
+    }
+}
+
+function showTrackActionSheet(result, anchorEl) {
+
+    activeTrackResult = result;
+    activeTrackElement = anchorEl;
+
+    const sheet = document.getElementById("trackActionSheet");
+    const rect = anchorEl.getBoundingClientRect();
+
+    // open first (off-screen concerns aside) so its real height can be
+    // measured, then decide which side of the anchor actually has room -
+    // below by default, above if the anchor is near the bottom edge
+    sheet.classList.add("open");
+
+    const sheetHeight = sheet.getBoundingClientRect().height;
+    const fitsBelow = rect.bottom + 4 + sheetHeight <= window.innerHeight;
+
+    sheet.style.top = (fitsBelow ? rect.bottom + 4 : rect.top - 4 - sheetHeight) + "px";
+    sheet.style.left = rect.left + "px";
+
+    document.addEventListener("click", handleOutsideTrackActionTap, { capture: true });
+    // the sheet is positioned to the anchor's on-screen rect at open
+    // time and doesn't follow it while scrolling, so it'd drift away
+    // from the track it's pointing at - just close it instead
+    document.getElementById("searchResults").addEventListener("scroll", hideTrackActionSheet);
+
+}
+
+function hideTrackActionSheet() {
+    activeTrackResult = null;
+    activeTrackElement = null;
+    document.getElementById("trackActionSheet").classList.remove("open");
+    document.removeEventListener("click", handleOutsideTrackActionTap, { capture: true });
+    document.getElementById("searchResults").removeEventListener("scroll", hideTrackActionSheet);
+}
+
+export async function queueAddActiveTrack() {
+    if (!activeTrackResult) return;
+    const id = activeTrackResult.id;
+    const element = activeTrackElement;
+    hideTrackActionSheet();
+    await api.queueAdd(id, getDirectionHint(id));
+    queuedWhileOverlayOpen = true;
+    if (element) {
+        // restart the animation even if the same row was just flashed
+        element.classList.remove("queued-flash");
+        void element.offsetWidth;
+        element.classList.add("queued-flash");
+    }
 }
 
 function createResultItem(result) {
@@ -418,6 +544,10 @@ function createResultItem(result) {
         '<div class="result-title">' + result.title + '</div>' +
         '<div class="result-artist">' + result.subtitle + '</div>' +
         '</div>';
+
+    if (!BROWSABLE_TYPES.includes(result.type)) {
+        attachLongPress(item, () => showTrackActionSheet(result, item));
+    }
 
     item.addEventListener("click", () => {
         if (result.type === "artist") {
@@ -650,7 +780,11 @@ export function goBack() {
 // sidebar's real Retour button (it checks first whether one is even
 // there, so this is safe to ask for unconditionally); going back to a
 // specific folder just re-reads whatever the sidebar already shows,
-// since it never left that folder to begin with
+// since it never left that folder to begin with. The server's own
+// response is only a scrape of whatever's currently visible, so for
+// the top level it's used just to settle the sidebar - if a fuller
+// "Charger plus" scan was already done for this library type, restore
+// that from cache instead of the partial scrape
 async function goBackInLibrary(view) {
 
     const exitFolder = view.type === "library";
@@ -668,7 +802,18 @@ async function goBackInLibrary(view) {
         recordView(view);
         setOverlayLocation(view.type === "library" ? libraryTypeLabels[view.libType] : view.title);
         showSearchOverlay();
-        renderResults(results);
+
+        const cached = view.type === "library" ? libraryFullCache[view.libType] : null;
+
+        if (cached) {
+            resetAccumulated(cached.tracks);
+            if (!cached.atBottom) {
+                libraryLoadMoreType = view.libType;
+                showLoadMoreButton(loadMoreLibraryTracks);
+            }
+        } else {
+            renderResults(results);
+        }
 
     }
     catch (e) {
@@ -683,6 +828,10 @@ async function goBackInLibrary(view) {
 
 }
 
+// "p"/"ar"/"al" are French abbreviations (Playlists/Artistes/Albums)
+// chosen for this author's own UI, not a general convention - adapting
+// this UI to another language means picking new shortcuts that make
+// sense there, these won't translate as-is
 const librarySearchShortcuts = { p: "playlists", ar: "artists", al: "albums" };
 const librarySearchShortcutLabels = { p: "Playlists", ar: "Artistes", al: "Albums" };
 
@@ -920,6 +1069,8 @@ export async function browseLibrary(type) {
         setOverlayLocation(libraryTypeLabels[type]);
         showSearchOverlay();
         resetAccumulated(data.tracks);
+
+        libraryFullCache[type] = { tracks: data.tracks, atBottom: data.atBottom };
 
         if (!data.atBottom) {
             libraryLoadMoreType = type;

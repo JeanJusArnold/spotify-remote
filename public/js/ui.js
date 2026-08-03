@@ -11,7 +11,8 @@ import {
     updateSeekbarFill,
     setSeeking,
     startPolling,
-    stopPolling
+    stopPolling,
+    queueAddActiveTrack
 } from "./player.js";
 
 const topbar = document.getElementById("topbar");
@@ -31,6 +32,8 @@ topbar.addEventListener("click", browseHome);
 document.getElementById("searchCloseButton").addEventListener("click", cancelLoadOrClose);
 document.getElementById("searchButton").addEventListener("click", () => doSearch());
 document.getElementById("overlayBackButton").addEventListener("click", goBack);
+
+document.getElementById("trackActionQueue").addEventListener("click", queueAddActiveTrack);
 
 document.getElementById("searchInput").addEventListener("keydown", (e) => {
     if (e.key === "Enter") {

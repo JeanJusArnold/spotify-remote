@@ -25,6 +25,10 @@ export async function playResult(id, direction) {
     return fetch("/play-result?id=" + id + (direction ? "&direction=" + direction : ""));
 }
 
+export async function queueAdd(id, direction) {
+    return fetch("/queue-add?id=" + id + (direction ? "&direction=" + direction : ""));
+}
+
 export async function getArtist(id, signal, direction, onChunk) {
     return streamNdjson("/artist?id=" + id + (direction ? "&direction=" + direction : ""), signal, onChunk);
 }

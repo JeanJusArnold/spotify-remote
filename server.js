@@ -166,8 +166,12 @@ async function connectSpotify() {
     );
 
     const contexts = browser.contexts();
+    const pages = contexts.flatMap(c => c.pages());
 
-    page = contexts[0].pages()[0];
+    // other tabs (e.g. left open from a browser-based `gh auth login`)
+    // can outnumber or come before the Spotify one, so pick it out by
+    // URL instead of assuming it's contexts[0].pages()[0]
+    page = pages.find(p => p.url().includes("open.spotify.com")) || pages[0];
 
     console.log("Connected to Spotify:", await page.title());
 
@@ -290,53 +294,66 @@ app.get("/repeat", async (req, res) => {
 // album, even when playing from a playlist/radio/etc.; the queue
 // panel's own heading ("À suivre dans : X") names the real context.
 // Reading either this or the queue list itself requires the panel to
-// be open, so both are read together in one open/read/close cycle,
-// only called when the client detects the track has actually changed
-// (not on a fixed poll), rather than on every /state request
+// be open, so both are read together here, only called when the
+// client detects the track has actually changed (not on a fixed poll),
+// rather than on every /state request. Left open afterwards rather
+// than restored to closed - flipping it open/closed on every track
+// change is more visually disruptive on the actual desktop screen
+// than just leaving it open once opened
 async function getContextAndQueue() {
 
     let list = await page.$('ul[aria-label="À suivre"]');
-    const wasClosed = !list;
 
-    if (wasClosed) {
+    if (!list) {
         await page.getByTestId("control-button-queue").click();
         await page.waitForSelector('ul[aria-label="À suivre"]', { timeout: 8000 });
     }
 
     const result = await page.evaluate(() => {
 
+        function scrapeRows(list) {
+
+            if (!list) return [];
+
+            const rows = [...list.querySelectorAll('li[role="row"]')];
+
+            return rows.map(row => {
+
+                const titleEl = row.querySelector('[id^="listrow-title-"]');
+                const subtitleEl = row.querySelector('[id^="listrow-subtitle-"]');
+                const cover = row.querySelector('img')?.src || "";
+
+                const artistLinks = [...(subtitleEl?.querySelectorAll('a') || [])];
+                const subtitle = artistLinks.length
+                    ? artistLinks.map(a => a.innerText).join(", ")
+                    : (subtitleEl?.innerText || "");
+
+                return { title: titleEl?.innerText || "", subtitle, cover };
+
+            });
+
+        }
+
         const list = document.querySelector('ul[aria-label="À suivre"]');
-        if (!list) return { context: "", queue: [] };
+        if (!list) return { context: "", queue: [], manualQueue: [] };
 
         const headingText = list.previousElementSibling?.innerText || "";
         const match = headingText.match(/:\s*(.+)/);
         const context = match ? match[1].trim() : "";
 
-        const rows = [...list.querySelectorAll('li[role="row"]')];
+        // manually-queued tracks ("Ajouter à la file d'attente") live in
+        // their own separate list, distinct from this algorithmic
+        // continuation - both are read together since both need the
+        // panel open anyway
+        const manualList = document.querySelector('ul[aria-label="À suivre dans la file d\'attente"]');
 
-        const queue = rows.map(row => {
-
-            const titleEl = row.querySelector('[id^="listrow-title-"]');
-            const subtitleEl = row.querySelector('[id^="listrow-subtitle-"]');
-            const cover = row.querySelector('img')?.src || "";
-
-            const artistLinks = [...(subtitleEl?.querySelectorAll('a') || [])];
-            const subtitle = artistLinks.length
-                ? artistLinks.map(a => a.innerText).join(", ")
-                : (subtitleEl?.innerText || "");
-
-            return { title: titleEl?.innerText || "", subtitle, cover };
-
-        });
-
-        return { context, queue };
+        return {
+            context,
+            queue: scrapeRows(list),
+            manualQueue: scrapeRows(manualList)
+        };
 
     });
-
-    // leave the panel as we found it
-    if (wasClosed) {
-        await page.getByTestId("control-button-queue").click();
-    }
 
     return result;
 
@@ -383,8 +400,11 @@ const shuffleButton =
         '[data-testid="general-controls"] button'
     );
 
+// no aria-checked/aria-pressed exposed on this button (unlike repeat
+// below), so state has to be read from Spotify's own "active" color
+// class instead of the language-dependent aria-label text
 const shuffle =
-    shuffleButton?.getAttribute("aria-label")?.startsWith("Désactiver") || false;
+    shuffleButton?.classList.contains("encore-internal-color-text-bright-accent") || false;
 
 const repeatChecked =
     document.querySelector(
@@ -524,6 +544,69 @@ async function tryClickPlayableElement(id) {
 
 }
 
+// same row-widening walk-up as tryClickPlayableElement, but opens the
+// "more options" menu and picks the queue entry instead of pressing
+// play - the menu item has no stable testid/attribute, only its French
+// label, same tradeoff as the other Spotify-rendered-text matches
+// elsewhere in this file (see the README's language dependency note)
+async function tryAddToQueue(id) {
+
+    const opened = await page.evaluate((id) => {
+
+        const link = document.querySelector(`a[href*="/${id}"]`)
+            || document.querySelector(`[aria-labelledby*="${id}"]`);
+
+        if (!link) return false;
+
+        let ancestor = link;
+
+        for (let d = 0; d < 6 && ancestor; d++) {
+
+            const moreBtn = [...ancestor.querySelectorAll('button')].find(b =>
+                b.getAttribute('data-testid') === 'more-button'
+            );
+
+            if (moreBtn) {
+                moreBtn.click();
+                return true;
+            }
+
+            ancestor = ancestor.parentElement;
+
+        }
+
+        return false;
+
+    }, id);
+
+    if (!opened) return false;
+
+    await page.waitForSelector('[role="menu"]', { timeout: 3000 }).catch(() => {});
+
+    const clicked = await page.evaluate(() => {
+
+        const menu = document.querySelector('[role="menu"]');
+        if (!menu) return false;
+
+        const item = [...menu.querySelectorAll('[role="menuitem"]')].find(i =>
+            i.innerText.trim() === "Ajouter à la file d'attente"
+        );
+
+        if (!item) return false;
+
+        item.click();
+        return true;
+
+    });
+
+    // don't leave a stray open menu behind if the item wasn't found
+    // (e.g. this row turned out not to be a track)
+    if (!clicked) await page.keyboard.press("Escape").catch(() => {});
+
+    return clicked;
+
+}
+
 async function scrollTracklistToTop() {
 
     await page.evaluate(() => {
@@ -651,8 +734,9 @@ async function pageStepUntilFound(focusFn, clickFn, direction, getScrollTop) {
 // relative to the center position "Charger plus" leaves the cursor
 // at, so it tells us which way to look. Clicking the column header
 // row gives real keyboard focus without risking triggering playback,
-// same trick as the "Charger plus" scan
-async function scrollToFindAndClick(id, direction) {
+// same trick as the "Charger plus" scan. clickFn is pluggable (play,
+// add to queue, ...) - only what happens once the row is found differs
+async function scrollToFindAndClick(clickFn, direction) {
 
     return pageStepUntilFound(async () => {
 
@@ -683,7 +767,7 @@ async function scrollToFindAndClick(id, direction) {
 
         return focused;
 
-    }, () => tryClickPlayableElement(id), direction, async () => {
+    }, clickFn, direction, async () => {
         const info = await currentTracklistScrollInfo();
         return info ? info.scrollTop : null;
     });
@@ -704,7 +788,7 @@ app.get("/play-result", async (req, res) => {
         let clicked = await tryClickPlayableElement(id);
 
         if (!clicked) {
-            clicked = await scrollToFindAndClick(id, direction);
+            clicked = await scrollToFindAndClick(() => tryClickPlayableElement(id), direction);
         }
 
         if (!clicked) {
@@ -716,6 +800,36 @@ app.get("/play-result", async (req, res) => {
     } catch (e) {
         console.error(e);
         res.status(500).send("play error");
+    }
+
+});
+
+app.get("/queue-add", async (req, res) => {
+
+    const id = req.query.id;
+    const direction = req.query.direction === "up" ? "up" : "down";
+
+    if (!id) {
+        return res.status(400).send("missing id");
+    }
+
+    try {
+
+        let added = await tryAddToQueue(id);
+
+        if (!added) {
+            added = await scrollToFindAndClick(() => tryAddToQueue(id), direction);
+        }
+
+        if (!added) {
+            return res.status(404).send("not found");
+        }
+
+        res.send("ok");
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).send("queue-add error");
     }
 
 });

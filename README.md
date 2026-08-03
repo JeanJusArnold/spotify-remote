@@ -20,6 +20,10 @@ Note also that this only *controls* playback — the audio itself plays wherever
 
 **Language dependency**: some of the scraping logic matches specific French UI labels Spotify renders (e.g. "Discographie", "À suivre", "Titres likés"), because the author's own Spotify account is set to French. If your Spotify Web Player is in a different language, some features will silently fail to find what they're looking for. Adapting the string matches in `server.js` to another language should be straightforward if you want to try.
 
+The frontend has its own separate language dependency: the search shortcuts ("p", "ar", "al" for Playlists/Artistes/Albums, see `librarySearchShortcuts` in `player.js`) are French abbreviations, unrelated to Spotify's own language. They won't make sense as-is in another language and would need picking new ones.
+
+These two are independent - changing one doesn't require changing the other - but if you're adapting this to another language, it's worth updating both to match for consistency.
+
 ## Scope & design choices
 
 This remote doesn't try to reproduce the full Spotify Web Player experience — navigation is intentionally simplified, especially around search, which is how the author mostly uses Spotify day to day. Some flows are reduced to whatever felt most relevant on a phone screen rather than mirroring every option the desktop/web client offers, so a few things you're used to in the real Spotify client may behave differently here, or not exist at all.
@@ -31,8 +35,10 @@ This remote doesn't try to reproduce the full Spotify Web Player experience — 
 - Chromium or Google Chrome, launched with remote debugging enabled and already logged into [open.spotify.com](https://open.spotify.com):
 
   ```
-  chromium --remote-debugging-port=9222 --app=https://open.spotify.com
+  chromium --remote-debugging-port=9222 --app=https://open.spotify.com --start-maximized
   ```
+
+  Keep the window maximized (`--start-maximized` above does this on launch) — the scraping logic scrolls through however many items fit on screen, so a small window means more scrolling and slower scraping.
 
 ## Setup
 
