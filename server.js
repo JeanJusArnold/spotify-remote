@@ -2432,11 +2432,16 @@ app.get("/queue-remove", async (req, res) => {
             await page.waitForSelector('ul[aria-label="À suivre"]', { timeout: 8000 });
         }
 
-        const opened = await page.evaluate(({ index, listType }) => {
+        const selector = listType === "manual"
+            ? 'ul[aria-label="À suivre dans la file d\'attente"]'
+            : 'ul[aria-label="À suivre"]';
 
-            const selector = listType === "manual"
-                ? 'ul[aria-label="À suivre dans la file d\'attente"]'
-                : 'ul[aria-label="À suivre"]';
+        const countBefore = await page.evaluate((selector) => {
+            const list = document.querySelector(selector);
+            return list ? list.querySelectorAll('li[role="row"]').length : 0;
+        }, selector);
+
+        const opened = await page.evaluate(({ selector, index }) => {
 
             const list = document.querySelector(selector);
             if (!list) return false;
@@ -2450,7 +2455,7 @@ app.get("/queue-remove", async (req, res) => {
             btn.click();
             return true;
 
-        }, { index, listType });
+        }, { selector, index });
 
         if (!opened) {
             return res.status(404).send("not found");
@@ -2477,11 +2482,19 @@ app.get("/queue-remove", async (req, res) => {
         if (!clicked) {
             await page.keyboard.press("Escape").catch(() => {});
         } else {
-            // the row's removal is animated on Spotify's side - without
-            // this, the client's immediate refresh right after this
-            // response can catch the row still mid-transition and
-            // render a stale list
-            await page.waitForTimeout(400);
+            // the row's removal is animated on Spotify's side - a fixed
+            // wait here was sometimes too short, leaving the client's
+            // immediate refresh to catch a stale, not-yet-updated list.
+            // Wait for the row count to actually drop instead
+            await page.waitForFunction(
+                ({ selector, countBefore }) => {
+                    const list = document.querySelector(selector);
+                    const count = list ? list.querySelectorAll('li[role="row"]').length : 0;
+                    return count < countBefore;
+                },
+                { selector, countBefore },
+                { timeout: 3000 }
+            ).catch(() => {});
         }
 
         res.send(clicked ? "ok" : "not found");

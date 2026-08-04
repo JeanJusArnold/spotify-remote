@@ -525,11 +525,17 @@ let queuedWhileOverlayOpen = false;
 
 // closes on any tap outside the sheet - only listens while it's open,
 // attached in showTrackActionSheet rather than left registered all the
-// time, since the sheet is only relevant for the brief window it's shown
+// time, since the sheet is only relevant for the brief window it's shown.
+// Runs in the capture phase, which fires on document before the
+// long-pressed row's own bubble-phase click-suppression listener gets a
+// chance to run (attachLongPress's stopImmediatePropagation there is too
+// late to stop this one) - so the trailing click a long-press release
+// leaves behind has to be ignored here too, by target, not just there
 function handleOutsideTrackActionTap(e) {
-    if (!document.getElementById("trackActionSheet").contains(e.target)) {
-        hideTrackActionSheet();
-    }
+    const sheet = document.getElementById("trackActionSheet");
+    if (sheet.contains(e.target)) return;
+    if (activeTrackElement && activeTrackElement.contains(e.target)) return;
+    hideTrackActionSheet();
 }
 
 // shared positioning for both sheet modes - scrollContainerId is
