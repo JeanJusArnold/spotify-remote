@@ -177,6 +177,8 @@ async function refreshContextAndQueue() {
             manualQueueListEl.appendChild(createQueueRow(item));
         });
 
+        updateManualQueueScrollThumb();
+
         const queueListEl = document.getElementById("queueList");
 
         queueListEl.innerHTML = "";
@@ -206,10 +208,10 @@ async function refreshContextAndQueue() {
 // mobile Chrome's native overflow scrollbar only shows while actively
 // scrolling, regardless of ::-webkit-scrollbar styling - this positions
 // a real element to stand in as an always-visible scrollbar instead
-export function updateQueueScrollThumb() {
+function updateScrollThumb(listId, thumbId) {
 
-    const list = document.getElementById("queueList");
-    const thumb = document.getElementById("queueScrollThumb");
+    const list = document.getElementById(listId);
+    const thumb = document.getElementById(thumbId);
 
     const scrollable = list.scrollHeight - list.clientHeight;
 
@@ -233,6 +235,14 @@ export function updateQueueScrollThumb() {
     thumb.style.height = thumbHeight + "px";
     thumb.style.top = (maxTop * ratio) + "px";
 
+}
+
+export function updateQueueScrollThumb() {
+    updateScrollThumb("queueList", "queueScrollThumb");
+}
+
+export function updateManualQueueScrollThumb() {
+    updateScrollThumb("manualQueueList", "manualQueueScrollThumb");
 }
 
 let titleKeys = null;

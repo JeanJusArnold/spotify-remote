@@ -13,7 +13,8 @@ import {
     startPolling,
     stopPolling,
     queueAddActiveTrack,
-    updateQueueScrollThumb
+    updateQueueScrollThumb,
+    updateManualQueueScrollThumb
 } from "./player.js";
 
 const topbar = document.getElementById("topbar");
@@ -80,7 +81,9 @@ updateSeekbarFill();
 
 
 document.getElementById("queueList").addEventListener("scroll", updateQueueScrollThumb);
+document.getElementById("manualQueueList").addEventListener("scroll", updateManualQueueScrollThumb);
 window.addEventListener("resize", updateQueueScrollThumb);
+window.addEventListener("resize", updateManualQueueScrollThumb);
 
 // mobile Chrome's collapsing/expanding URL bar (often triggered right
 // when an inner scroll hits its bottom) resizes the viewport without
@@ -89,6 +92,7 @@ window.addEventListener("resize", updateQueueScrollThumb);
 // on a size computed mid-transition
 if (window.visualViewport) {
     window.visualViewport.addEventListener("resize", updateQueueScrollThumb);
+    window.visualViewport.addEventListener("resize", updateManualQueueScrollThumb);
 }
 
 

@@ -851,6 +851,17 @@ button:active {
 }
 
 
+#manualQueueListWrap {
+
+    position:relative;
+
+    display:flex;
+    flex:1;
+    min-height:0;
+
+}
+
+
 #manualQueueList {
 
     flex:1;
@@ -867,6 +878,21 @@ button:active {
 
 #manualQueueList::-webkit-scrollbar {
     display:none;
+}
+
+
+#manualQueueScrollThumb {
+
+    position:absolute;
+    top:0;
+    right:2px;
+    width:5px;
+
+    border-radius:3px;
+    background:rgba(255, 255, 255, 0.45);
+
+    pointer-events:none;
+
 }
 
 
