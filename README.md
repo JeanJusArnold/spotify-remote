@@ -13,7 +13,7 @@ Use at your own risk. There is no warranty (see [LICENSE](./LICENSE)), and Spoti
 - `server.js` connects to a running Chromium instance over CDP (`chromium.connectOverCDP`) and drives the already-open Spotify Web Player tab with Playwright: reading the DOM to scrape your library/playlists/artists/albums, and clicking through the UI to navigate and search.
 - Transport commands (play/pause/next/previous) go straight to Chromium's MPRIS interface over D-Bus instead of clicking DOM buttons, for reliability.
 - A small static frontend (`public/`) is served by the same Express app, meant to be opened from your phone.
-- Getting that audio onto your phone is handled by [AudioRelay](https://audiorelay.net) (available on Flathub) — a separate app, on both the desktop and your phone, not something the remote's own page does. `openbox-autostart.example` documents the desktop side. This was landed on after trying a couple of DIY alternatives (a VLC/ffmpeg stream captured from a virtual sink, played through a browser `<audio>` tag) that turned out heavier on CPU, or came with real playback drawbacks (growing latency behind live audio, since a plain `<audio>` element can't skip ahead to "now" the way purpose-built low-latency protocols can) — AudioRelay just works better for this.
+- Getting that audio onto your phone is handled by [AudioRelay](https://audiorelay.net) (available on Flathub) — a separate app, on both the desktop and your phone, not something the remote's own page does. `openbox-autostart.example` documents the desktop side.
 
 **No built-in authentication**: there's no password or login, so don't expose this to the public internet (e.g. don't port-forward it). Use a private network like Tailscale to reach it remotely instead.
 
@@ -59,13 +59,13 @@ Optionally, [EasyEffects](https://github.com/wwmm/easyeffects) can sit between C
 
 If you set this dedicated session up, make sure your display manager doesn't boot straight into it. It's also not something you want live right after a cold boot, especially since a minimal session like this is more likely to fail to start cleanly than your main one. On GDM with autologin enabled, this is a real pitfall: it silently re-logs into whichever session was last selected at the greeter (tracked per-user by AccountsService), so picking the dedicated session there even once makes it the autologin target from then on. Pin your main session instead by writing it directly to `/var/lib/AccountsService/users/<username>` (e.g. `Session=gnome`, `SessionType=wayland`) so autologin always lands there regardless of what was last picked manually.
 
-Start Chromium as shown above, log into Spotify, then start the server:
+If you'd rather skip the dedicated-session setup entirely, three manual steps are all you actually need: launch Chromium with the command from the [Requirements](#requirements) section above, log into Spotify in it, then start the server:
 
 ```bash
 node server.js
 ```
 
-(The autostart script above does both of these automatically on login. Running them by hand like this is what you'll actually use while developing, though - direct access to the server's logs, and a quick restart after every code change.)
+(The autostart script above does both of these automatically on login)
 
 Open `http://<machine-ip>:3000` from your phone (over Tailscale or whatever private network reaches that machine).
 

@@ -58,8 +58,7 @@ sleep 3
 # Getting that audio onto your phone is a separate concern from the
 # remote itself, but AudioRelay (https://audiorelay.net, available on
 # Flathub) is what this project actually uses for it - picked after
-# trying a few DIY alternatives (see the README) that all turned out
-# heavier or worse in practice. Install it first:
+# trying a few DIY alternatives (a VLC/ffmpeg stream captured from a virtual sink, played through a browser `<audio>` tag) that turned out heavier on CPU, or came with real playback drawbacks (growing latency behind live audio, since a plain `<audio>` element can't skip ahead to "now" the way purpose-built low-latency protocols can) — AudioRelay just works better for this. Install it first:
 #   flatpak install flathub net.audiorelay.AudioRelay
 flatpak run net.audiorelay.AudioRelay &
 
