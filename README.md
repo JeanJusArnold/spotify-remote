@@ -53,17 +53,19 @@ npm install
 
 You almost certainly don't need this, but `.env.example` documents one very specific workaround for a bug tied to one particular playlist — copy it to `.env` and fill in the value only if you actually hit that issue (see the file for details).
 
-`openbox-autostart.example` documents a full recommended session setup (virtual audio sink, launching Chromium, launching AudioRelay) as a copyable template for a dedicated session running just this project — copy it to `~/.config/openbox/autostart`. Install [AudioRelay](https://audiorelay.net) on your phone too, to actually hear what you're controlling: open Tailscale to find the machine's Tailscale IP, then enter it in AudioRelay on your phone to connect. Set AudioRelay's buffer amount to high in its settings — a low buffer leads to noticeably choppier playback over a remote (non-LAN) connection like Tailscale.
+`openbox-autostart.example` documents a full recommended session setup (virtual audio sink, launching Chromium, launching AudioRelay, and launching the remote itself) as a copyable template for a dedicated session running just this project — copy it to `~/.config/openbox/autostart`. Install [AudioRelay](https://audiorelay.net) on your phone too, to actually hear what you're controlling: open Tailscale to find the machine's Tailscale IP, then enter it in AudioRelay on your phone to connect. Set AudioRelay's buffer amount to high in its settings — a low buffer leads to noticeably choppier playback over a remote (non-LAN) connection like Tailscale.
 
 Optionally, [EasyEffects](https://github.com/wwmm/easyeffects) can sit between Chromium and the virtual sink to level out loudness differences between tracks. `openbox-autostart.example` has the details (install command, and the Auto Gain settings this project settled on).
 
 If you set this dedicated session up, make sure your display manager doesn't boot straight into it. It's also not something you want live right after a cold boot, especially since a minimal session like this is more likely to fail to start cleanly than your main one. On GDM with autologin enabled, this is a real pitfall: it silently re-logs into whichever session was last selected at the greeter (tracked per-user by AccountsService), so picking the dedicated session there even once makes it the autologin target from then on. Pin your main session instead by writing it directly to `/var/lib/AccountsService/users/<username>` (e.g. `Session=gnome`, `SessionType=wayland`) so autologin always lands there regardless of what was last picked manually.
 
-Start Chromium as shown above and log into Spotify, then:
+Start Chromium as shown above, log into Spotify, then start the remote:
 
 ```bash
 node server.js
 ```
+
+(The autostart script above does both of these automatically on login. Running them by hand like this is what you'll actually use while developing, though - direct access to the server's logs, and a quick restart after every code change.)
 
 Open `http://<machine-ip>:3000` from your phone (over Tailscale or whatever private network reaches that machine).
 

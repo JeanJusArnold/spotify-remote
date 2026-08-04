@@ -43,7 +43,7 @@ pactl set-sink-volume spotify-remote-audio 100%
 # Target -20dB (a short history reacts too abruptly to track changes).
 # Settings persist automatically once set.
 #   flatpak install flathub com.github.wwmm.easyeffects
-flatpak run com.github.wwmm.easyeffects --hide-window &
+flatpak run com.github.wwmm.easyeffects &
 
 sleep 2
 
@@ -62,3 +62,11 @@ sleep 3
 # heavier or worse in practice. Install it first:
 #   flatpak install flathub net.audiorelay.AudioRelay
 flatpak run net.audiorelay.AudioRelay &
+
+# Launch the remote itself - adjust the path below if you cloned this
+# repo somewhere other than ~/spotify-remote. Logging to a file here
+# instead of just discarding output, since debugging an autostarted
+# process is otherwise harder than running `node server.js` by hand in
+# a terminal (which is still worth doing while actively developing -
+# this is for a settled, day-to-day setup)
+(cd "$HOME/spotify-remote" && node server.js >> "$HOME/spotify-remote/server.log" 2>&1) &
