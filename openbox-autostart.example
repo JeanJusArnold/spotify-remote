@@ -63,7 +63,7 @@ sleep 3
 #   flatpak install flathub net.audiorelay.AudioRelay
 flatpak run net.audiorelay.AudioRelay &
 
-# Launch the remote itself - adjust the path below if you cloned this
+# Launch the server itself - adjust the path below if you cloned this
 # repo somewhere other than ~/spotify-remote. Logging to a file here
 # instead of just discarding output, since debugging an autostarted
 # process is otherwise harder than running `node server.js` by hand in
