@@ -16,6 +16,10 @@ export async function playQueueItem(index) {
     return fetch("/queue-play?index=" + index);
 }
 
+export async function queueRemove(index, listType) {
+    return fetch("/queue-remove?index=" + index + "&list=" + listType);
+}
+
 export async function search(query, signal) {
     const res = await fetch("/search?q=" + encodeURIComponent(query), { signal });
     return res.json();

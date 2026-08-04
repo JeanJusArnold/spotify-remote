@@ -12,7 +12,7 @@ import {
     setSeeking,
     startPolling,
     stopPolling,
-    queueAddActiveTrack,
+    handleTrackActionClick,
     updateQueueScrollThumb,
     updateManualQueueScrollThumb
 } from "./player.js";
@@ -35,7 +35,7 @@ document.getElementById("searchCloseButton").addEventListener("click", cancelLoa
 document.getElementById("searchButton").addEventListener("click", () => doSearch());
 document.getElementById("overlayBackButton").addEventListener("click", goBack);
 
-document.getElementById("trackActionQueue").addEventListener("click", queueAddActiveTrack);
+document.getElementById("trackActionQueue").addEventListener("click", handleTrackActionClick);
 
 document.getElementById("searchInput").addEventListener("keydown", (e) => {
     if (e.key === "Enter") {

@@ -128,7 +128,7 @@ export async function updateState() {
 
 let lastQueueSignature = "";
 
-function createQueueRow(item) {
+function createQueueRow(item, index, listType) {
 
     const row = document.createElement("div");
     row.className = "result-item";
@@ -139,6 +139,8 @@ function createQueueRow(item) {
         '<div class="result-title">' + item.title + '</div>' +
         '<div class="result-artist">' + item.subtitle + '</div>' +
         '</div>';
+
+    attachLongPress(row, () => openRemoveFromQueueSheet(index, listType, row));
 
     return row;
 
@@ -173,8 +175,8 @@ async function refreshContextAndQueue() {
         const manualQueueListEl = document.getElementById("manualQueueList");
         manualQueueListEl.innerHTML = "";
 
-        data.manualQueue.forEach(item => {
-            manualQueueListEl.appendChild(createQueueRow(item));
+        data.manualQueue.forEach((item, index) => {
+            manualQueueListEl.appendChild(createQueueRow(item, index, "manual"));
         });
 
         updateManualQueueScrollThumb();
@@ -185,7 +187,7 @@ async function refreshContextAndQueue() {
 
         data.queue.forEach((item, index) => {
 
-            const row = createQueueRow(item);
+            const row = createQueueRow(item, index, "queue");
 
             row.addEventListener("click", async () => {
                 await api.playQueueItem(index);
@@ -514,8 +516,11 @@ function attachLongPress(element, onLongPress) {
 
 }
 
-let activeTrackResult = null;
+let activeSheetMode = null; // "add" | "remove"
+let activeTrackResult = null; // used when mode is "add"
+let activeQueueRemoval = null; // { index, listType } used when mode is "remove"
 let activeTrackElement = null;
+let activeScrollContainerId = null;
 let queuedWhileOverlayOpen = false;
 
 // closes on any tap outside the sheet - only listens while it's open,
@@ -527,10 +532,13 @@ function handleOutsideTrackActionTap(e) {
     }
 }
 
-function showTrackActionSheet(result, anchorEl) {
+// shared positioning for both sheet modes - scrollContainerId is
+// whichever list the anchor lives in, so the sheet closes rather than
+// drift away from the row it's pointing at once that list scrolls
+function showTrackActionSheet(anchorEl, scrollContainerId) {
 
-    activeTrackResult = result;
     activeTrackElement = anchorEl;
+    activeScrollContainerId = scrollContainerId;
 
     const sheet = document.getElementById("trackActionSheet");
     const rect = anchorEl.getBoundingClientRect();
@@ -547,23 +555,38 @@ function showTrackActionSheet(result, anchorEl) {
     sheet.style.left = rect.left + "px";
 
     document.addEventListener("click", handleOutsideTrackActionTap, { capture: true });
-    // the sheet is positioned to the anchor's on-screen rect at open
-    // time and doesn't follow it while scrolling, so it'd drift away
-    // from the track it's pointing at - just close it instead
-    document.getElementById("searchResults").addEventListener("scroll", hideTrackActionSheet);
+    document.getElementById(scrollContainerId).addEventListener("scroll", hideTrackActionSheet);
 
 }
 
 function hideTrackActionSheet() {
+    activeSheetMode = null;
     activeTrackResult = null;
+    activeQueueRemoval = null;
     activeTrackElement = null;
     document.getElementById("trackActionSheet").classList.remove("open");
     document.removeEventListener("click", handleOutsideTrackActionTap, { capture: true });
-    document.getElementById("searchResults").removeEventListener("scroll", hideTrackActionSheet);
+    if (activeScrollContainerId) {
+        document.getElementById(activeScrollContainerId).removeEventListener("scroll", hideTrackActionSheet);
+        activeScrollContainerId = null;
+    }
 }
 
-export async function queueAddActiveTrack() {
-    if (!activeTrackResult) return;
+function openAddToQueueSheet(result, anchorEl) {
+    activeSheetMode = "add";
+    activeTrackResult = result;
+    document.getElementById("trackActionQueue").textContent = "Ajouter à la file d'attente";
+    showTrackActionSheet(anchorEl, "searchResults");
+}
+
+function openRemoveFromQueueSheet(index, listType, anchorEl) {
+    activeSheetMode = "remove";
+    activeQueueRemoval = { index, listType };
+    document.getElementById("trackActionQueue").textContent = "Supprimer de la file d'attente";
+    showTrackActionSheet(anchorEl, listType === "manual" ? "manualQueueList" : "queueList");
+}
+
+async function performQueueAdd() {
     const id = activeTrackResult.id;
     const element = activeTrackElement;
     hideTrackActionSheet();
@@ -574,6 +597,25 @@ export async function queueAddActiveTrack() {
         element.classList.remove("queued-flash");
         void element.offsetWidth;
         element.classList.add("queued-flash");
+    }
+}
+
+async function performQueueRemove() {
+    const { index, listType } = activeQueueRemoval;
+    hideTrackActionSheet();
+    await api.queueRemove(index, listType);
+    // removing shifts every later index, and neither queue list is tied
+    // to the currently-playing title, so nothing else would trigger a
+    // refresh on its own - force one now
+    lastQueueSignature = "";
+    refreshContextAndQueue();
+}
+
+export async function handleTrackActionClick() {
+    if (activeSheetMode === "add") {
+        await performQueueAdd();
+    } else if (activeSheetMode === "remove") {
+        await performQueueRemove();
     }
 }
 
@@ -590,7 +632,7 @@ function createResultItem(result) {
         '</div>';
 
     if (!BROWSABLE_TYPES.includes(result.type)) {
-        attachLongPress(item, () => showTrackActionSheet(result, item));
+        attachLongPress(item, () => openAddToQueueSheet(result, item));
     }
 
     item.addEventListener("click", () => {

@@ -2415,6 +2415,84 @@ app.get("/queue-play", async (req, res) => {
 
 });
 
+app.get("/queue-remove", async (req, res) => {
+
+    const index = Number(req.query.index);
+    const listType = req.query.list === "manual" ? "manual" : "queue";
+
+    if (isNaN(index) || index < 0) {
+        return res.status(400).send("invalid index");
+    }
+
+    try {
+
+        let list = await page.$('ul[aria-label="À suivre"]');
+        if (!list) {
+            await page.getByTestId("control-button-queue").click();
+            await page.waitForSelector('ul[aria-label="À suivre"]', { timeout: 8000 });
+        }
+
+        const opened = await page.evaluate(({ index, listType }) => {
+
+            const selector = listType === "manual"
+                ? 'ul[aria-label="À suivre dans la file d\'attente"]'
+                : 'ul[aria-label="À suivre"]';
+
+            const list = document.querySelector(selector);
+            if (!list) return false;
+
+            const row = list.querySelectorAll('li[role="row"]')[index];
+            if (!row) return false;
+
+            const btn = row.querySelector('[data-testid="more-button"]');
+            if (!btn) return false;
+
+            btn.click();
+            return true;
+
+        }, { index, listType });
+
+        if (!opened) {
+            return res.status(404).send("not found");
+        }
+
+        await page.waitForSelector('[role="menu"]', { timeout: 3000 }).catch(() => {});
+
+        const clicked = await page.evaluate(() => {
+
+            const menu = document.querySelector('[role="menu"]');
+            if (!menu) return false;
+
+            const item = [...menu.querySelectorAll('[role="menuitem"]')].find(i =>
+                i.innerText.trim() === "Supprimer de la file d'attente"
+            );
+
+            if (!item) return false;
+
+            item.click();
+            return true;
+
+        });
+
+        if (!clicked) {
+            await page.keyboard.press("Escape").catch(() => {});
+        } else {
+            // the row's removal is animated on Spotify's side - without
+            // this, the client's immediate refresh right after this
+            // response can catch the row still mid-transition and
+            // render a stale list
+            await page.waitForTimeout(400);
+        }
+
+        res.send(clicked ? "ok" : "not found");
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).send("queue-remove error");
+    }
+
+});
+
 app.get("/seek", async (req, res) => {
 
     const percent = Number(req.query.percent);

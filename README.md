@@ -41,7 +41,7 @@ This remote doesn't try to reproduce the full Spotify Web Player experience — 
 
   Keep the window maximized (`--start-maximized` above does this on launch) — the scraping logic scrolls through however many items fit on screen, so a small window means more scrolling and slower scraping.
 
-  Install an ad blocker like [uBlock Origin](https://ublockorigin.com/) in this Chromium.
+  Don't forget to install an ad blocker like [uBlock Origin](https://ublockorigin.com/) in this Chromium.
 
 ## Setup
 
