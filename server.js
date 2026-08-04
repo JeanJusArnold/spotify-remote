@@ -182,6 +182,15 @@ async function connectSpotify() {
     controls.repeat =
         page.getByTestId("control-button-repeat");
 
+    controls.playPause =
+        page.getByTestId("control-button-playpause");
+
+    controls.next =
+        page.getByTestId("control-button-skip-forward");
+
+    controls.previous =
+        page.getByTestId("control-button-skip-back");
+
     console.log("Spotify controls loaded");
 
 
@@ -246,11 +255,25 @@ async function ensureFrenchLocaleForBuggyPlaylist(id) {
 }
 
 
+// Chromium's MPRIS D-Bus service (org.mpris.MediaPlayer2.chromium.
+// instanceXXXXX) is unreliable for roughly the first minute after a
+// fresh Chromium/tab launch - it can be briefly unregistered while the
+// tab's media session is still settling, so the first playpause of a
+// session can find nothing to talk to over D-Bus and silently fail. A
+// real click on Spotify's own button doesn't depend on that service at
+// all (it's the same thing a manual mouse click does), so it's used as
+// a fallback whenever MPRIS isn't there to answer
+async function playPauseFallback() {
+    await controls.playPause.click({ noWaitAfter: true });
+    return true;
+}
+
 app.get("/playpause", async (req, res) => {
 
     const start = performance.now();
 
-    const ok = await mprisCommand("PlayPause");
+    let ok = await mprisCommand("PlayPause");
+    if (!ok) ok = await playPauseFallback();
 
     const end = performance.now();
 
@@ -264,13 +287,15 @@ app.get("/playpause", async (req, res) => {
 });
 
 app.get("/next", async (req, res) => {
-    const ok = await mprisCommand("Next");
+    let ok = await mprisCommand("Next");
+    if (!ok) ok = await controls.next.click({ noWaitAfter: true }).then(() => true);
     res.send(ok ? "ok" : "mpris unavailable");
 });
 
 
 app.get("/previous", async (req, res) => {
-    const ok = await mprisCommand("Previous");
+    let ok = await mprisCommand("Previous");
+    if (!ok) ok = await controls.previous.click({ noWaitAfter: true }).then(() => true);
     res.send(ok ? "ok" : "mpris unavailable");
 });
 
