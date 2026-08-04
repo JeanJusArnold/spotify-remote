@@ -194,10 +194,44 @@ async function refreshContextAndQueue() {
 
         });
 
+        updateQueueScrollThumb();
+
     }
     catch (e) {
         console.log(e);
     }
+
+}
+
+// mobile Chrome's native overflow scrollbar only shows while actively
+// scrolling, regardless of ::-webkit-scrollbar styling - this positions
+// a real element to stand in as an always-visible scrollbar instead
+export function updateQueueScrollThumb() {
+
+    const list = document.getElementById("queueList");
+    const thumb = document.getElementById("queueScrollThumb");
+
+    const scrollable = list.scrollHeight - list.clientHeight;
+
+    if (scrollable <= 1) {
+        thumb.style.display = "none";
+        return;
+    }
+
+    thumb.style.display = "block";
+
+    // clamped defensively: touch overscroll bounce can push scrollTop
+    // past the real scrollable range for a frame, which would otherwise
+    // blow thumbTop/thumbHeight past the track and look like a full bar
+    const thumbHeight = Math.min(
+        list.clientHeight,
+        Math.max(30, list.clientHeight * (list.clientHeight / list.scrollHeight))
+    );
+    const maxTop = list.clientHeight - thumbHeight;
+    const ratio = Math.min(1, Math.max(0, list.scrollTop / scrollable));
+
+    thumb.style.height = thumbHeight + "px";
+    thumb.style.top = (maxTop * ratio) + "px";
 
 }
 

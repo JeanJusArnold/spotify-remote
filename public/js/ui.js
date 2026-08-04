@@ -12,7 +12,8 @@ import {
     setSeeking,
     startPolling,
     stopPolling,
-    queueAddActiveTrack
+    queueAddActiveTrack,
+    updateQueueScrollThumb
 } from "./player.js";
 
 const topbar = document.getElementById("topbar");
@@ -76,6 +77,19 @@ seekbar.addEventListener("pointerup", commitSeek);
 seekbar.addEventListener("pointercancel", commitSeek);
 
 updateSeekbarFill();
+
+
+document.getElementById("queueList").addEventListener("scroll", updateQueueScrollThumb);
+window.addEventListener("resize", updateQueueScrollThumb);
+
+// mobile Chrome's collapsing/expanding URL bar (often triggered right
+// when an inner scroll hits its bottom) resizes the viewport without
+// firing a plain window "resize" event - visualViewport is the event
+// that actually fires for it, and without this the thumb can get stuck
+// on a size computed mid-transition
+if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", updateQueueScrollThumb);
+}
 
 
 document.addEventListener("visibilitychange", () => {

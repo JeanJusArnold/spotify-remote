@@ -168,6 +168,10 @@ body {
     flex:1;
     min-width:0;
 
+    -webkit-touch-callout:none;
+    -webkit-user-select:none;
+    user-select:none;
+
 }
 
 
@@ -769,6 +773,10 @@ button:active {
 
     cursor:pointer;
 
+    -webkit-touch-callout:none;
+    -webkit-user-select:none;
+    user-select:none;
+
 }
 
 
@@ -978,11 +986,23 @@ button:active {
 }
 
 
+#queueListWrap {
+
+    position:relative;
+
+    display:flex;
+    flex:1;
+    min-height:0;
+
+}
+
+
 #queueList {
 
     flex:1;
     min-height:0;
     overflow-y:auto;
+    overscroll-behavior-y:contain;
     -webkit-overflow-scrolling:touch;
     scrollbar-width:none;
     -ms-overflow-style:none;
@@ -994,6 +1014,25 @@ button:active {
 
 #queueList::-webkit-scrollbar {
     display:none;
+}
+
+
+/* native overflow scrollbars only show up on touch/scroll on mobile
+   Chrome, no CSS trick makes them permanently visible - this thumb is
+   a real element, positioned/sized in JS from queueList's scroll
+   metrics, so it stays visible at all times regardless of platform */
+#queueScrollThumb {
+
+    position:absolute;
+    top:0;
+    right:2px;
+    width:5px;
+
+    border-radius:3px;
+    background:rgba(255, 255, 255, 0.45);
+
+    pointer-events:none;
+
 }
 
 

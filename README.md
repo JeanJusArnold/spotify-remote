@@ -1,6 +1,6 @@
 # Spotify Remote
 
-A phone-facing web remote for controlling Spotify running in a desktop browser: play/pause, skip, search, browse your library, artists, albums and playlists, all from a page you open on your phone. It comes with an optional companion setup for a dedicated, resource-conscious desktop session — including streaming that session's audio back to your phone too.
+A phone-facing web remote for controlling Spotify running in a desktop browser: play/pause, skip, search, browse your library, artists, albums and playlists, all from a page you open on your phone. It comes with a recommended companion setup for a dedicated, resource-conscious desktop session — including streaming that session's audio back to your phone too.
 
 ## Disclaimer
 
@@ -16,6 +16,8 @@ Use at your own risk. There is no warranty (see [LICENSE](./LICENSE)), and Spoti
 - Getting that audio onto your phone is handled by [AudioRelay](https://audiorelay.net) (available on Flathub) — a separate app, on both the desktop and your phone, not something the remote's own page does. `openbox-autostart.example` documents the desktop side. This was landed on after trying a couple of DIY alternatives (a VLC/ffmpeg stream captured from a virtual sink, played through a browser `<audio>` tag) that turned out heavier on CPU, or came with real playback drawbacks (growing latency behind live audio, since a plain `<audio>` element can't skip ahead to "now" the way purpose-built low-latency protocols can) — AudioRelay just works better for this.
 
 **No built-in authentication**: there's no password or login, so don't expose this to the public internet (e.g. don't port-forward it). Use a private network like Tailscale to reach it remotely instead.
+
+**Tuned for Chrome**: the phone-facing frontend was built and tested against Chrome for Android specifically — a handful of fixes (hiding scrollbars, blocking long-press text selection, working around Chrome's collapsing URL bar) rely on Chrome/WebKit-specific CSS and APIs. It should still load and work in other mobile browsers, just without these refinements.
 
 **Language dependency**: some of the scraping logic matches specific French UI labels Spotify renders (e.g. "Discographie", "À suivre", "Titres likés"), because the author's own Spotify account is set to French. If your Spotify Web Player is in a different language, some features will silently fail to find what they're looking for. Adapting the string matches in `server.js` to another language should be straightforward if you want to try.
 
@@ -39,6 +41,8 @@ This remote doesn't try to reproduce the full Spotify Web Player experience — 
 
   Keep the window maximized (`--start-maximized` above does this on launch) — the scraping logic scrolls through however many items fit on screen, so a small window means more scrolling and slower scraping.
 
+  Install an ad blocker like [uBlock Origin](https://ublockorigin.com/) in this Chromium.
+
 ## Setup
 
 ```bash
@@ -50,6 +54,8 @@ npm install
 You almost certainly don't need this, but `.env.example` documents one very specific workaround for a bug tied to one particular playlist — copy it to `.env` and fill in the value only if you actually hit that issue (see the file for details).
 
 `openbox-autostart.example` documents a full recommended session setup (virtual audio sink, launching Chromium, launching AudioRelay) as a copyable template for a dedicated session running just this project — copy it to `~/.config/openbox/autostart`. Install [AudioRelay](https://audiorelay.net) on your phone too, to actually hear what you're controlling: open Tailscale to find the machine's Tailscale IP, then enter it in AudioRelay on your phone to connect. Set AudioRelay's buffer amount to high in its settings — a low buffer leads to noticeably choppier playback over a remote (non-LAN) connection like Tailscale.
+
+If you set this dedicated session up, make sure your display manager doesn't boot straight into it. It's also not something you want live right after a cold boot, especially since a minimal session like this is more likely to fail to start cleanly than your main one. On GDM with autologin enabled, this is a real pitfall: it silently re-logs into whichever session was last selected at the greeter (tracked per-user by AccountsService), so picking the dedicated session there even once makes it the autologin target from then on. Pin your main session instead by writing it directly to `/var/lib/AccountsService/users/<username>` (e.g. `Session=gnome`, `SessionType=wayland`) so autologin always lands there regardless of what was last picked manually.
 
 Start Chromium as shown above and log into Spotify, then:
 
