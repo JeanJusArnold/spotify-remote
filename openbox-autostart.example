@@ -25,7 +25,27 @@ sleep 3
 
 # Route audio to the virtual sink
 pactl set-default-sink spotify-remote-audio
-pactl set-sink-volume spotify-remote-audio 75%
+pactl set-sink-volume spotify-remote-audio 100%
+
+# Optional: EasyEffects (https://github.com/wwmm/easyeffects, on
+# Flathub) sits between Chromium and the virtual sink to level out
+# loudness differences between tracks. Spotify does this itself with
+# per-track loudness metadata it doesn't expose to outside apps (and
+# the Web API endpoint that used to expose it is deprecated), so this
+# is a live approximation instead, via EasyEffects' Auto Gain effect -
+# expect a gradual gain drift after a track change rather than an
+# instant correction, since it reacts to what it measures rather than
+# knowing a track's loudness ahead of time. On its first launch, it
+# automatically targets whatever the current default sink is
+# (spotify-remote-audio here) and remembers that choice - nothing to
+# configure by hand for routing. Install it, then add "Auto Gain" from
+# the Output tab and set: Reference "Integrated", Max History 60s,
+# Target -20dB (a short history reacts too abruptly to track changes).
+# Settings persist automatically once set.
+#   flatpak install flathub com.github.wwmm.easyeffects
+flatpak run com.github.wwmm.easyeffects --hide-window &
+
+sleep 2
 
 # Launch the Chromium instance this project drives via CDP
 chromium-browser \
