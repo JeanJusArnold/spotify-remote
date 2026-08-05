@@ -20,7 +20,9 @@ if ! pactl list short sinks | grep -q "spotify-remote-audio"; then
         sink_properties=device.description=SpotifyRemoteAudio
 fi
 
-# Give PipeWire/WirePlumber a moment to finish initializing
+# Give PipeWire/WirePlumber a moment to finish initializing - there's no
+# simple external signal to poll for this one (unlike the waits below),
+# so a fixed wait is what this settled on
 sleep 3
 
 # Route audio to the virtual sink
@@ -45,7 +47,27 @@ pactl set-sink-volume spotify-remote-audio 100%
 #   flatpak install flathub com.github.wwmm.easyeffects
 flatpak run com.github.wwmm.easyeffects &
 
-sleep 2
+# AudioRelay only depends on the virtual sink above, not on Chromium or
+# EasyEffects, so it's launched right alongside EasyEffects rather than
+# sequenced after anything. Getting that audio onto your phone is a
+# separate concern from the remote itself, but AudioRelay
+# (https://audiorelay.net, available on Flathub) is what this project
+# actually uses for it - picked after trying a few DIY alternatives (a
+# VLC/ffmpeg stream captured from a virtual sink, played through a
+# browser `<audio>` tag) that turned out heavier on CPU, or came with
+# real playback drawbacks (growing latency behind live audio, since a
+# plain `<audio>` element can't skip ahead to "now" the way
+# purpose-built low-latency protocols can) — AudioRelay just works
+# better for this. Install it first:
+#   flatpak install flathub net.audiorelay.AudioRelay
+flatpak run net.audiorelay.AudioRelay &
+
+# Wait for EasyEffects' own PipeWire node to exist, so Chromium's audio
+# stream gets picked up by the effect chain from the very first sound
+# it makes, instead of possibly routing straight to the virtual sink
+until pactl list short sinks | grep -q easyeffects; do
+    sleep 0.2
+done
 
 # Launch the Chromium instance this project drives via CDP
 chromium-browser \
@@ -53,14 +75,11 @@ chromium-browser \
   --remote-debugging-port=9222 \
   --start-maximized &
 
-sleep 3
-
-# Getting that audio onto your phone is a separate concern from the
-# remote itself, but AudioRelay (https://audiorelay.net, available on
-# Flathub) is what this project actually uses for it - picked after
-# trying a few DIY alternatives (a VLC/ffmpeg stream captured from a virtual sink, played through a browser `<audio>` tag) that turned out heavier on CPU, or came with real playback drawbacks (growing latency behind live audio, since a plain `<audio>` element can't skip ahead to "now" the way purpose-built low-latency protocols can) — AudioRelay just works better for this. Install it first:
-#   flatpak install flathub net.audiorelay.AudioRelay
-flatpak run net.audiorelay.AudioRelay &
+# Wait for Chromium's remote debugging port to actually answer, rather
+# than guessing a fixed delay
+until curl -s http://127.0.0.1:9222/json/version >/dev/null 2>&1; do
+    sleep 0.2
+done
 
 # Launch the server itself - adjust the path below if you cloned this
 # repo somewhere other than ~/spotify-remote. Logging to a file here
