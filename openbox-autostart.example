@@ -62,6 +62,30 @@ flatpak run com.github.wwmm.easyeffects &
 #   flatpak install flathub net.audiorelay.AudioRelay
 flatpak run net.audiorelay.AudioRelay &
 
+# Watchdog: AudioRelay's capture backend (RtAudio) can silently relink
+# itself to the wrong PipeWire monitor during one of its own device
+# rescans (observed cause: a phone reconnecting at the same time as an
+# unrelated ALSA device re-enumeration, e.g. a GPU's HDMI audio output
+# being re-probed) - it doesn't report an error or fix it on its own when
+# this happens, so this loop checks the link every few seconds and
+# restores it if needed
+(
+    while true; do
+        for ch in FL FR; do
+            wrong=$(pw-link -l 2>/dev/null | awk -v p="RtAudio:input_$ch" '
+                $0==p {want=1; next}
+                want && /^  \|<-/ {sub(/^  \|<- /,""); print; exit}
+                want {exit}
+            ')
+            if [ -n "$wrong" ] && [ "$wrong" != "spotify-remote-audio:monitor_$ch" ]; then
+                pw-link -d "$wrong" "RtAudio:input_$ch" 2>/dev/null
+                pw-link "spotify-remote-audio:monitor_$ch" "RtAudio:input_$ch" 2>/dev/null
+            fi
+        done
+        sleep 5
+    done
+) &
+
 # Wait for EasyEffects' own PipeWire node to exist, so Chromium's audio
 # stream gets picked up by the effect chain from the very first sound
 # it makes, instead of possibly routing straight to the virtual sink
