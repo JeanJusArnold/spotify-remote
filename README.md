@@ -8,6 +8,15 @@ This is a personal project, **not affiliated with or endorsed by Spotify**. It w
 
 Use at your own risk. There is no warranty (see [LICENSE](./LICENSE)), and Spotify could change their web player's markup at any time and break parts of this without notice.
 
+## Screenshots
+
+<p>
+<img src="screenshots/main.png" width="200" alt="Now-playing view with the queue">
+<img src="screenshots/search.png" width="200" alt="Search results">
+<img src="screenshots/album.png" width="200" alt="Album tracklist">
+<img src="screenshots/home.png" width="200" alt="Home overlay with recommended sections">
+</p>
+
 ## How it works
 
 - `server.js` connects to a running Chromium instance over CDP (`chromium.connectOverCDP`) and drives the already-open Spotify Web Player tab with Playwright: reading the DOM to scrape your library/playlists/artists/albums, and clicking through the UI to navigate and search.
