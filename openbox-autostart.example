@@ -62,6 +62,16 @@ flatpak run com.github.wwmm.easyeffects &
 #   flatpak install flathub net.audiorelay.AudioRelay
 flatpak run net.audiorelay.AudioRelay &
 
+# AudioRelay -> Spotify bridge: mirrors AudioRelay's own connect/
+# disconnect events onto Spotify's play/pause, so stopping/starting
+# AudioRelay's transmission (its free-tier stop/start button - the
+# premium play/pause button acts the same way, it also disconnects
+# rather than just muting locally) also pauses/resumes Spotify. Goes
+# through the remote's own /play and /pause rather than MPRIS directly,
+# so it still works right after a fresh Chromium launch, before MPRIS
+# has registered (see audiorelay-mpris-bridge.sh for why).
+"$HOME/spotify-remote/audiorelay-mpris-bridge.sh" >> "$HOME/spotify-remote/audiorelay-bridge.log" 2>&1 &
+
 # Watchdog: AudioRelay's capture backend (RtAudio) can silently relink
 # itself to the wrong PipeWire monitor during one of its own device
 # rescans (observed cause: a phone reconnecting at the same time as an

@@ -4,6 +4,8 @@ const express = require("express");
 const { chromium } = require("playwright");
 const { execFile } = require("child_process");
 const util = require("util");
+const fs = require("fs");
+const os = require("os");
 
 const execFileAsync = util.promisify(execFile);
 
@@ -286,6 +288,34 @@ app.get("/playpause", async (req, res) => {
     res.send(ok ? "ok" : "mpris unavailable");
 });
 
+// Explicit (non-toggling) play/pause, for callers that know the state
+// they want rather than just wanting to flip it (e.g.
+// audiorelay-mpris-bridge.sh, reacting to AudioRelay's own connect/
+// disconnect) - PlayPause's fallback above doesn't fit here since
+// blindly clicking when already in the target state would flip it the
+// wrong way instead of doing nothing
+app.get("/play", async (req, res) => {
+    let ok = await mprisCommand("Play");
+    if (!ok) {
+        const alreadyPlaying =
+            (await controls.playPause.getAttribute("aria-label")) === "Pause";
+        if (!alreadyPlaying) await controls.playPause.click({ noWaitAfter: true });
+        ok = true;
+    }
+    res.send(ok ? "ok" : "mpris unavailable");
+});
+
+app.get("/pause", async (req, res) => {
+    let ok = await mprisCommand("Pause");
+    if (!ok) {
+        const alreadyPlaying =
+            (await controls.playPause.getAttribute("aria-label")) === "Pause";
+        if (alreadyPlaying) await controls.playPause.click({ noWaitAfter: true });
+        ok = true;
+    }
+    res.send(ok ? "ok" : "mpris unavailable");
+});
+
 app.get("/next", async (req, res) => {
     let ok = await mprisCommand("Next");
     if (!ok) ok = await controls.next.click({ noWaitAfter: true }).then(() => true);
@@ -384,6 +414,35 @@ async function getContextAndQueue() {
 
 }
 
+const AUDIORELAY_LOG = path.join(
+    os.homedir(),
+    ".var/app/net.audiorelay.AudioRelay/cache/audiorelay/logs/audiorelay.log"
+);
+
+// Only reads the last few KB of the log (it can grow to several MB over a
+// long session) rather than the whole file, cheap enough to do on every
+// /state poll. Returns null (unknown) rather than guessing if the log
+// doesn't exist or has no connect/disconnect line yet - e.g. AudioRelay
+// isn't part of this setup at all.
+function isAudioRelayConnected() {
+    try {
+        const stat = fs.statSync(AUDIORELAY_LOG);
+        const chunkSize = Math.min(stat.size, 8192);
+        const buffer = Buffer.alloc(chunkSize);
+        const fd = fs.openSync(AUDIORELAY_LOG, "r");
+        fs.readSync(fd, buffer, 0, chunkSize, stat.size - chunkSize);
+        fs.closeSync(fd);
+        const lines = buffer.toString("utf8").split("\n");
+        for (let i = lines.length - 1; i >= 0; i--) {
+            if (lines[i].includes("Remote device connected")) return true;
+            if (lines[i].includes("Remote device disconnected")) return false;
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
 app.get("/state", async (req, res) => {
 
     const state = await page.evaluate(() => {
@@ -453,6 +512,8 @@ return {
 };
 
 });
+
+    state.audioRelayConnected = isAudioRelayConnected();
 
     res.json(state);
 
