@@ -293,7 +293,11 @@ app.get("/playpause", async (req, res) => {
 // audiorelay-mpris-bridge.sh, reacting to AudioRelay's own connect/
 // disconnect) - PlayPause's fallback above doesn't fit here since
 // blindly clicking when already in the target state would flip it the
-// wrong way instead of doing nothing
+// wrong way instead of doing nothing. The fallback itself still matters
+// here just as much: right after a fresh Chromium launch nothing has
+// played yet, so Chromium hasn't registered its MPRIS interface at all,
+// and mprisCommand() below would otherwise just fail silently until
+// someone clicks play by hand once.
 app.get("/play", async (req, res) => {
     let ok = await mprisCommand("Play");
     if (!ok) {
