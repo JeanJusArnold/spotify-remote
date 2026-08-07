@@ -1,11 +1,7 @@
-try { process.loadEnvFile(); } catch { /* no .env file, that's fine */ }
-
 const express = require("express");
 const { chromium } = require("playwright");
 const { execFile } = require("child_process");
 const util = require("util");
-const fs = require("fs");
-const os = require("os");
 
 const execFileAsync = util.promisify(execFile);
 
@@ -202,18 +198,17 @@ async function connectSpotify() {
 // ---------------------------------------------------------------------
 // Known personal quirks
 //
-// Workarounds for issues specific to one account's own Spotify content,
-// not the app's logic. Configured via .env (see .env.example) so the
-// source stays generic - unset for anyone else running this project,
-// they just never trigger.
+// Workarounds for issues specific to this account's own Spotify content,
+// not the app's logic.
 // ---------------------------------------------------------------------
 
-// on this account, one specific playlist's Spotify-side data flips the
-// whole web player to Arabic (sp_locale cookie set to "ar" by Spotify's
-// own backend) as soon as it's opened - not something we can prevent, so
-// we just check for it and silently fix it whenever that playlist loads
-const ARABIC_LOCALE_BUG_PLAYLIST_ID = process.env.ARABIC_LOCALE_BUG_PLAYLIST_ID;
-
+// on this account, some Spotify-side content (confirmed so far: one
+// specific playlist, and separately "Titres likés") flips the whole web
+// player to Arabic (sp_locale cookie set to "ar" by Spotify's own
+// backend) as soon as it's opened - not something we can prevent, and
+// not worth tracking down every id that triggers it, so this checks for
+// it after every playlist load instead and silently fixes it whenever it
+// happens
 async function fixArabicLocaleBug() {
     await page.context().addCookies([{
         name: "sp_locale",
@@ -228,13 +223,11 @@ async function fixArabicLocaleBug() {
     await page.reload({ waitUntil: "domcontentloaded" });
 }
 
-// the "ar" cookie doesn't always land the instant the playlist opens -
-// it can show up a moment later, so a single check right after navigation
+// the "ar" cookie doesn't always land the instant a playlist opens - it
+// can show up a moment later, so a single check right after navigation
 // isn't enough. Poll for a few seconds, and if it flips, fix it and watch
 // again (the fix's own re-navigation can retrigger the same bug)
-async function ensureFrenchLocaleForBuggyPlaylist(id) {
-
-    if (id !== ARABIC_LOCALE_BUG_PLAYLIST_ID) return;
+async function ensureFrenchLocale(id) {
 
     for (let attempt = 0; attempt < 2; attempt++) {
 
@@ -418,35 +411,6 @@ async function getContextAndQueue() {
 
 }
 
-const AUDIORELAY_LOG = path.join(
-    os.homedir(),
-    ".var/app/net.audiorelay.AudioRelay/cache/audiorelay/logs/audiorelay.log"
-);
-
-// Only reads the last few KB of the log (it can grow to several MB over a
-// long session) rather than the whole file, cheap enough to do on every
-// /state poll. Returns null (unknown) rather than guessing if the log
-// doesn't exist or has no connect/disconnect line yet - e.g. AudioRelay
-// isn't part of this setup at all.
-function isAudioRelayConnected() {
-    try {
-        const stat = fs.statSync(AUDIORELAY_LOG);
-        const chunkSize = Math.min(stat.size, 8192);
-        const buffer = Buffer.alloc(chunkSize);
-        const fd = fs.openSync(AUDIORELAY_LOG, "r");
-        fs.readSync(fd, buffer, 0, chunkSize, stat.size - chunkSize);
-        fs.closeSync(fd);
-        const lines = buffer.toString("utf8").split("\n");
-        for (let i = lines.length - 1; i >= 0; i--) {
-            if (lines[i].includes("Remote device connected")) return true;
-            if (lines[i].includes("Remote device disconnected")) return false;
-        }
-        return null;
-    } catch {
-        return null;
-    }
-}
-
 app.get("/state", async (req, res) => {
 
     const state = await page.evaluate(() => {
@@ -516,8 +480,6 @@ return {
 };
 
 });
-
-    state.audioRelayConnected = isAudioRelayConnected();
 
     res.json(state);
 
@@ -2061,7 +2023,7 @@ app.get("/playlist", async (req, res) => {
 
         await page.waitForSelector('[data-testid="tracklist-row"]', { timeout: 8000 });
 
-        await ensureFrenchLocaleForBuggyPlaylist(id);
+        await ensureFrenchLocale(id);
 
         await waitForStableCount(page.locator('[data-testid="tracklist-row"]'));
 

@@ -60,32 +60,11 @@ let currentAlbumCoverKey = "";
 
 let lastKnownTitle = null;
 
-// so other modules (the AudioRelay overlay in ui.js) can react to the
-// latest known playback/AudioRelay state without polling /state a
-// second time themselves
-let lastState = null;
-
-export function getLastState() {
-    return lastState;
-}
-
-// lets ui.js react to fresh state on every poll without polling /state a
-// second time itself, without player.js needing to know anything about
-// what it's used for (avoids a circular import with ui.js) - a single
-// slot, since there's only ever one consumer right now
-let stateUpdateListener = null;
-
-export function onStateUpdate(listener) {
-    stateUpdateListener = listener;
-}
-
 export async function updateState() {
 
     try {
 
         const state = await api.getState();
-        lastState = state;
-        if (stateUpdateListener) stateUpdateListener(state);
 
         // the context name and the "up next" queue both require
         // opening the webplayer's queue panel to read, unlike

@@ -23,7 +23,7 @@ Use at your own risk. There is no warranty (see [LICENSE](./LICENSE)), and Spoti
 - Transport commands (play/pause/next/previous) go straight to Chromium's MPRIS interface over D-Bus instead of clicking DOM buttons, for reliability.
 - A small static frontend (`public/`) is served by the same Express app, meant to be opened from your phone.
 - Getting that audio onto your phone is handled by [AudioRelay](https://audiorelay.net) (available on Flathub) — a separate app, on both the desktop and your phone, not something the remote's own page does. `openbox-autostart.example` documents the desktop side.
-- Off-wifi, pausing Spotify from the remote alone still leaves AudioRelay's connection open and transmitting (measured: it drops from about 240KB to about 70KB over 10 seconds while paused — real, but far from zero), so it doesn't save nearly as much battery/data as actually closing the connection would (which AudioRelay's own free-tier stop/start button, or premium's notification play/pause, does — `audiorelay-mpris-bridge.sh` keeps Spotify in sync with that). So off-wifi specifically, the remote's play/pause button is covered by a translucent reminder of this instead of being fully usable — a single tap dismisses it for the rest of that off-wifi stretch, revealing the real button underneath. Back on wifi, where the cost of that idle connection is negligible either way, there's no reminder at all.
+- Pausing Spotify from the remote alone still leaves AudioRelay's connection open and transmitting (measured: it drops from about 240KB to about 70KB over 10 seconds while paused — real, but far from zero), so it doesn't save nearly as much battery/data as actually closing the connection would (which AudioRelay's own free-tier stop/start button, or premium's notification play/pause, does). `audiorelay-mpris-bridge.sh` keeps Spotify in sync with that instead.
 
 **No built-in authentication**: there's no password or login, so don't expose this to the public internet (e.g. don't port-forward it). Use a private network like Tailscale to reach it remotely instead.
 
@@ -60,8 +60,6 @@ git clone <this repo>
 cd spotify-remote
 npm install
 ```
-
-You almost certainly don't need this, but `.env.example` documents one very specific workaround for a bug tied to one particular playlist — copy it to `.env` and fill in the value only if you actually hit that issue (see the file for details).
 
 `openbox-autostart.example` documents a full recommended session setup (virtual audio sink, launching Chromium, launching AudioRelay, and launching the server itself) as a copyable template for a dedicated session running just this project — copy it to `~/.config/openbox/autostart`. Install [AudioRelay](https://audiorelay.net) on your phone too, to actually hear what you're controlling: open Tailscale to find the machine's Tailscale IP, then enter it in AudioRelay on your phone to connect. Set AudioRelay's buffer amount to high in its settings — a low buffer leads to noticeably choppier playback over a remote (non-LAN) connection like Tailscale.
 
