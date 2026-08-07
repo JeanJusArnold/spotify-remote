@@ -5,10 +5,8 @@
 # play/pause, which is the one that's confirmed to actually disconnect
 # rather than just mute locally) also pauses/resumes Spotify.
 #
-# This only works one-way (AudioRelay -> Spotify) - see the AudioRelay
-# overlay in public/js/ui.js for the other half (routing the remote's own
-# play/pause through AudioRelay off-wifi, instead of building a second,
-# opposite bridge).
+# This only works one-way (AudioRelay -> Spotify) - using the remote's
+# own play/pause doesn't do anything to AudioRelay's connection in return.
 
 LOG="$HOME/.var/app/net.audiorelay.AudioRelay/cache/audiorelay/logs/audiorelay.log"
 
