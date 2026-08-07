@@ -176,9 +176,19 @@ async function refreshContextAndQueue() {
         manualQueueListEl.innerHTML = "";
 
         data.manualQueue.forEach((item, index) => {
-            manualQueueListEl.appendChild(createQueueRow(item, index, "manual"));
+
+            const row = createQueueRow(item, index, "manual");
+
+            row.addEventListener("click", async () => {
+                await api.playQueueItem(index, "manual");
+                updateState();
+            });
+
+            manualQueueListEl.appendChild(row);
+
         });
 
+        manualQueueListEl.scrollTop = 0;
         updateManualQueueScrollThumb();
 
         const queueListEl = document.getElementById("queueList");
@@ -198,6 +208,7 @@ async function refreshContextAndQueue() {
 
         });
 
+        queueListEl.scrollTop = 0;
         updateQueueScrollThumb();
 
     }
@@ -1022,6 +1033,11 @@ export async function playResult(id) {
     coverTappedForCurrentAlbum = false;
 
     updateState();
+    // updateState only refreshes the queue panel when the title looks
+    // like it changed - two different tracks can share the same title
+    // (a duplicate entry, a remix, a live version), which would
+    // otherwise leave the queue panel stuck on whatever played before
+    refreshContextAndQueue();
 
 }
 

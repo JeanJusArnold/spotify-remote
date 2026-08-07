@@ -2394,6 +2394,7 @@ app.get("/context-and-queue", async (req, res) => {
 app.get("/queue-play", async (req, res) => {
 
     const index = Number(req.query.index);
+    const listType = req.query.list === "manual" ? "manual" : "queue";
 
     if (isNaN(index) || index < 0) {
         return res.status(400).send("invalid index");
@@ -2410,9 +2411,13 @@ app.get("/queue-play", async (req, res) => {
             await page.waitForSelector('ul[aria-label="À suivre"]', { timeout: 8000 });
         }
 
-        const clicked = await page.evaluate((index) => {
+        const selector = listType === "manual"
+            ? 'ul[aria-label="À suivre dans la file d\'attente"]'
+            : 'ul[aria-label="À suivre"]';
 
-            const list = document.querySelector('ul[aria-label="À suivre"]');
+        const clicked = await page.evaluate(({ selector, index }) => {
+
+            const list = document.querySelector(selector);
             if (!list) return false;
 
             const rows = [...list.querySelectorAll('li[role="row"]')];
@@ -2427,7 +2432,7 @@ app.get("/queue-play", async (req, res) => {
             btn.click();
             return true;
 
-        }, index);
+        }, { selector, index });
 
         if (!clicked) {
             return res.status(404).send("not found");

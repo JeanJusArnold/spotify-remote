@@ -12,8 +12,8 @@ export async function getContextAndQueue() {
     return res.json();
 }
 
-export async function playQueueItem(index) {
-    return fetch("/queue-play?index=" + index);
+export async function playQueueItem(index, listType) {
+    return fetch("/queue-play?index=" + index + (listType ? "&list=" + listType : ""));
 }
 
 export async function queueRemove(index, listType) {
