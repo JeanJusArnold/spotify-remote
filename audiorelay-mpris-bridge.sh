@@ -1,9 +1,7 @@
 #!/bin/bash
 # Mirrors AudioRelay's own connect/disconnect events (read from its log)
 # to Spotify's play/pause, so pausing/resuming AudioRelay's transmission
-# (its free-tier stop/start button, or its premium notification
-# play/pause, which is the one that's confirmed to actually disconnect
-# rather than just mute locally) also pauses/resumes Spotify.
+# (its stop/start button) also pauses/resumes Spotify.
 #
 # This only works one-way (AudioRelay -> Spotify) - using the remote's
 # own play/pause doesn't do anything to AudioRelay's connection in return.
