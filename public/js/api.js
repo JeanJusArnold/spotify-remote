@@ -79,6 +79,11 @@ export async function getPlaylistMore(signal, onChunk) {
     return streamNdjson("/playlist-more", signal, onChunk);
 }
 
+export async function getWhatsNew(signal) {
+    const res = await fetch("/whats-new", { signal });
+    return res.json();
+}
+
 export async function getLibrary(type, signal) {
     const res = await fetch("/library?type=" + type, { signal });
     return res.json();

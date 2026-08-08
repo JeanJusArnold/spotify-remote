@@ -831,6 +831,18 @@ button:active {
 }
 
 
+.result-meta {
+
+    color:#777;
+    font-size:12px;
+
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+
+}
+
+
 /* grows with its content (flex-basis:auto, the default) up to whatever
    space is actually left in .container, pushing the "À suivre" section
    down as it does - but flex-shrink:1 lets the flex algorithm compress

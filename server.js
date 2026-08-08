@@ -589,6 +589,119 @@ app.get("/search", async (req, res) => {
 
 });
 
+function scrapeWhatsNewRows() {
+
+    return page.evaluate(() => {
+
+        const rows = [...document.querySelectorAll(
+            '[data-testid="infinite-scroll-list"] li[role="row"]'
+        )];
+
+        return rows.map(row => {
+
+            const titleLink = row.querySelector('[data-encore-id="listRowTitle"] a[href]');
+            if (!titleLink) return null;
+
+            const href = titleLink.getAttribute('href');
+            const match = href.match(/\/(artist|album|track|playlist)\/([a-zA-Z0-9]+)/);
+
+            if (!match) return null;
+
+            const subtitleEl = row.querySelector('[data-encore-id="listRowSubtitle"]');
+            const artists = subtitleEl?.innerText || "";
+
+            // "__bottom" (BEM suffix, tolerant of the hashed class
+            // prefix changing across Spotify deploys - same trick as
+            // [class*="YourLibraryX"] elsewhere) holds the release type
+            // ("Single"/"Album") and a relative date ("il y a 2 jours")
+            // that's sometimes in weeks/months instead - both nested
+            // together with no separator in the raw text, so split the
+            // date out first and rejoin cleanly
+            const bottomEl = row.querySelector('[class*="__bottom"]');
+            let releaseInfo = "";
+            if (bottomEl) {
+                const dateText = bottomEl.querySelector('span > span')?.textContent.trim() || "";
+                const typeText = bottomEl.textContent.replace(dateText, "").trim();
+                releaseInfo = [typeText, dateText].filter(Boolean).join(" · ");
+            }
+
+            return {
+                id: match[2],
+                type: match[1],
+                title: titleLink.innerText,
+                subtitle: artists,
+                meta: releaseInfo,
+                cover: row.querySelector('img')?.src || ""
+            };
+
+        }).filter(Boolean);
+
+    });
+
+}
+
+// Unlike the library sidebar's virtualized rows, nothing here ever gets
+// removed from the DOM once loaded - it's a plain paginated
+// infinite-scroll: each real scroll near the bottom loads +10 more rows
+// (confirmed: idle waiting alone, or setting scrollTop directly, does
+// NOT trigger it - it needs an actual scroll/wheel event), up to a hard
+// cap (observed 50, but not hardcoded here - just scroll until the
+// count stops growing).
+async function scrapeAllWhatsNewRows() {
+
+    const rowLocator = page.locator('[data-testid="infinite-scroll-list"] li[role="row"]');
+
+    await rowLocator.first().waitFor({ timeout: 8000 });
+
+    const box = await page.locator('[data-testid="infinite-scroll-list"]').boundingBox();
+    if (box) await page.mouse.move(box.x + box.width / 2, box.y + 50);
+
+    let lastCount = await rowLocator.count();
+
+    for (let i = 0; i < 20; i++) {
+
+        await page.mouse.wheel(0, 3000);
+        await page.waitForTimeout(500);
+
+        const count = await rowLocator.count();
+
+        if (count === lastCount) break;
+
+        lastCount = count;
+
+    }
+
+    return await scrapeWhatsNewRows();
+
+}
+
+// "Nouveautés" - new releases from followed artists/podcasts. Same
+// scraped shape as /search ({id, type, title, subtitle, cover}) so the
+// existing result rendering/click-to-play on the client works unchanged.
+// The "Musique" tab is Spotify's default here, so only album/track/
+// artist/playlist links show up - podcast episodes (a separate tab)
+// aren't covered yet, same as /search already only handles those types.
+app.get("/whats-new", async (req, res) => {
+
+    try {
+
+        // The button toggles the view - clicking it while already there
+        // closes it and navigates back, so only click when needed
+        if (!page.url().includes("/content-feed")) {
+            await page.click('[data-testid="whats-new-feed-button"]');
+        }
+
+        const results = await scrapeAllWhatsNewRows();
+
+        res.json(results);
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).send("whats-new error");
+    }
+
+});
+
 async function tryClickPlayableElement(id) {
 
     return await page.evaluate((id) => {

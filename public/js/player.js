@@ -646,6 +646,7 @@ function createResultItem(result) {
         '<div class="result-info">' +
         '<div class="result-title">' + result.title + '</div>' +
         '<div class="result-artist">' + result.subtitle + '</div>' +
+        (result.meta ? '<div class="result-meta">' + result.meta + '</div>' : '') +
         '</div>';
 
     if (!BROWSABLE_TYPES.includes(result.type)) {
@@ -871,6 +872,7 @@ export function goBack() {
     else if (view.type === "artist") browseArtist(view.id, view.cover, view.title);
     else if (view.type === "album") browseAlbum(view.id, view.cover, view.title);
     else if (view.type === "playlist") browsePlaylist(view.id, view.cover, view.title);
+    else if (view.type === "whats-new") browseWhatsNew();
     else if (view.type === "library" || view.type === "libraryFolder") goBackInLibrary(view);
     else if (view.type === "currentArtist") browseCurrentArtist();
     else if (view.type === "currentAlbum") browseCurrentAlbum();
@@ -936,7 +938,7 @@ async function goBackInLibrary(view) {
 // this UI to another language means picking new shortcuts that make
 // sense there, these won't translate as-is
 const librarySearchShortcuts = { p: "playlists", ar: "artists", al: "albums" };
-const librarySearchShortcutLabels = { p: "Playlists", ar: "Artistes", al: "Albums" };
+const librarySearchShortcutLabels = { p: "Playlists", ar: "Artistes", al: "Albums", n: "Nouveautés" };
 
 export function updateSearchGhost() {
 
@@ -974,6 +976,11 @@ export async function doSearch(overrideQuery) {
 
     if (libraryType) {
         browseLibrary(libraryType);
+        return;
+    }
+
+    if (query.toLowerCase() === "n") {
+        browseWhatsNew();
         return;
     }
 
@@ -1142,6 +1149,36 @@ export async function browsePlaylist(id, fallbackCover, title) {
             playlistLoadMoreFallbackCover = fallbackCover || "";
             showLoadMoreButton(loadMorePlaylistTracks);
         }
+
+    }
+    catch (e) {
+        endAbortableLoad();
+
+        if (e.name === "AbortError") return;
+
+        showSearchOverlay();
+        document.getElementById("searchResults").innerText = "Erreur";
+        console.log(e);
+    }
+
+}
+
+export async function browseWhatsNew() {
+
+    homeOverlayActive = false;
+    resetLoadMoreState();
+
+    const signal = beginAbortableLoad();
+
+    try {
+
+        const results = await api.getWhatsNew(signal);
+
+        endAbortableLoad();
+        recordView({ type: "whats-new" });
+        setOverlayLocation("Nouveautés");
+        showSearchOverlay();
+        renderResults(results);
 
     }
     catch (e) {
