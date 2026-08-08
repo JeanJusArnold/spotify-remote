@@ -263,10 +263,31 @@ async function playPauseFallback() {
     return true;
 }
 
+// gdbus can report success on a stale/idle MPRIS interface without any
+// real effect - confirmed case: after the minimal session sits idle for
+// a while, waking it (mouse/keyboard) leaves MPRIS commands acknowledged
+// but silently no-op until a real click happens once. Catching that
+// needs checking the button's state again a moment later, but the
+// happy path (the vast majority of calls) is near-instant - so that
+// check runs in the background *after* responding, instead of holding
+// up every single call for it. A real, working MPRIS call has been
+// observed to land in well under 100ms.
+const SELF_HEAL_DELAY_MS = 100;
+
+function selfHealPlayPauseIfUnchanged(before) {
+    setTimeout(async () => {
+        try {
+            const after = await controls.playPause.getAttribute("aria-label");
+            if (after === before) await playPauseFallback();
+        } catch (e) { /* page navigated away or similar - nothing to heal */ }
+    }, SELF_HEAL_DELAY_MS);
+}
+
 app.get("/playpause", async (req, res) => {
 
     const start = performance.now();
 
+    const before = await controls.playPause.getAttribute("aria-label");
     let ok = await mprisCommand("PlayPause");
     if (!ok) ok = await playPauseFallback();
 
@@ -279,6 +300,8 @@ app.get("/playpause", async (req, res) => {
     );
 
     res.send(ok ? "ok" : "mpris unavailable");
+
+    if (ok) selfHealPlayPauseIfUnchanged(before);
 });
 
 // Explicit (non-toggling) play/pause, for callers that know the state
@@ -291,6 +314,18 @@ app.get("/playpause", async (req, res) => {
 // played yet, so Chromium hasn't registered its MPRIS interface at all,
 // and mprisCommand() below would otherwise just fail silently until
 // someone clicks play by hand once.
+// Same "acknowledged but no real effect" gap as /playpause above - the
+// target state is known here, so healing just means checking that state
+// was actually reached, in the background, after responding.
+function selfHealTowards(targetIsPlaying) {
+    setTimeout(async () => {
+        try {
+            const isPlaying = (await controls.playPause.getAttribute("aria-label")) === "Pause";
+            if (isPlaying !== targetIsPlaying) await controls.playPause.click({ noWaitAfter: true });
+        } catch (e) { /* page navigated away or similar - nothing to heal */ }
+    }, SELF_HEAL_DELAY_MS);
+}
+
 app.get("/play", async (req, res) => {
     let ok = await mprisCommand("Play");
     if (!ok) {
@@ -300,6 +335,8 @@ app.get("/play", async (req, res) => {
         ok = true;
     }
     res.send(ok ? "ok" : "mpris unavailable");
+
+    selfHealTowards(true);
 });
 
 app.get("/pause", async (req, res) => {
@@ -311,6 +348,8 @@ app.get("/pause", async (req, res) => {
         ok = true;
     }
     res.send(ok ? "ok" : "mpris unavailable");
+
+    selfHealTowards(false);
 });
 
 app.get("/next", async (req, res) => {
