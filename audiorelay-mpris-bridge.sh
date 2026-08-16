@@ -18,7 +18,10 @@ LOG="$HOME/.var/app/net.audiorelay.AudioRelay/cache/audiorelay/logs/audiorelay.l
 send_command() {
     local endpoint="$1"
     echo "$(date +%T) -> $endpoint"
-    curl -s -o /dev/null "http://127.0.0.1:3000/$endpoint"
+    # -k: the server's cert is issued for its Tailscale MagicDNS name
+    # (see TLS_CERT_PATH in server.js), not 127.0.0.1 - fine to skip
+    # verification here since this is loopback, not a real network hop
+    curl -sk -o /dev/null "https://127.0.0.1:3000/$endpoint"
 }
 
 # -F retries until the log file exists, so this doesn't need to wait for

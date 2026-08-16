@@ -1,5 +1,6 @@
 import {
     cmd,
+    togglePlayPause,
     doSearch,
     cancelLoadOrClose,
     browseCurrentArtist,
@@ -14,8 +15,22 @@ import {
     stopPolling,
     handleTrackActionClick,
     updateQueueScrollThumb,
-    updateManualQueueScrollThumb
+    updateManualQueueScrollThumb,
+    openSharedLink
 } from "./player.js";
+import { unlockHlsAudio } from "./hlsListen.js";
+
+// Android's share sheet launches the installed PWA at this URL with the
+// shared content as query params (see share_target in manifest.json) -
+// hand anything Spotify-looking off to the server to open on the PC's
+// own page. Cleaned from the URL right after so a reload (or reopening
+// from the homescreen icon) doesn't replay the same share.
+const shareParams = new URLSearchParams(location.search);
+const sharedLink = shareParams.get("url") || shareParams.get("text") || "";
+if (/spotify/i.test(sharedLink)) {
+    openSharedLink(sharedLink);
+    history.replaceState(null, "", location.pathname);
+}
 
 const topbar = document.getElementById("topbar");
 
@@ -64,7 +79,10 @@ cover.addEventListener("pointerup", (e) => {
 
 document.getElementById("shuffleBtn").addEventListener("click", () => cmd("shuffle"));
 document.getElementById("prevBtn").addEventListener("click", () => cmd("previous"));
-document.getElementById("play").addEventListener("click", () => cmd("playpause"));
+document.getElementById("play").addEventListener("click", () => {
+    unlockHlsAudio();
+    togglePlayPause();
+});
 document.getElementById("nextBtn").addEventListener("click", () => cmd("next"));
 document.getElementById("repeatBtn").addEventListener("click", () => cmd("repeat"));
 

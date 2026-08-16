@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:name=".SpotifyRemoteApp"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.SpotifyRemote"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:usesCleartextTraffic="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.SpotifyRemote">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- share sheet: "Partager" -> this app from Spotify or any
+                 other app offering a Spotify link -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+
+            <!-- direct link tap. Deliberately scoped to https://open.spotify.com
+                 only, not the spotify: URI scheme - claiming that scheme
+                 system-wide would put this app in the way of the real
+                 Spotify app's own internal link handling for everyone,
+                 not just this one deep-link case. Android cannot verify
+                 domain ownership for a domain we don't control
+                 (open.spotify.com), so this can't be a fully-verified App
+                 Link - the first tap after install shows a disambiguation
+                 dialog (or opens in-browser) until the user manually
+                 enables "open supported links" for this app in system
+                 Settings. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="https"
+                    android:host="open.spotify.com" />
+            </intent-filter>
+        </activity>
+
+        <!-- Plain (non-foreground) started services get stopped by the
+             system once the app isn't foregrounded - confirmed live: it
+             survived the poll-loop-relocation fix for a while but was
+             gone (dumpsys activity services showed nothing) later in the
+             same idle session. mediaPlayback is the real, legitimate
+             foregroundServiceType here, not a workaround. -->
+        <service
+            android:name=".player.PlaybackService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback">
+            <!-- lets the system (Bluetooth/Android Auto/assistant) find
+                 the session - standard Media3 MediaSessionService setup -->
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
+
+    </application>
+
+</manifest>

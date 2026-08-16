@@ -95,12 +95,15 @@ spotify remote
 
 
 
-<input 
+<div class="seekbar-wrap">
+<input
     id="seekbar"
     type="range"
     min="0"
     max="1000"
     value="0">
+<div id="hlsPositionMarker"></div>
+</div>
 
 
 
@@ -179,6 +182,13 @@ spotify remote
 
 
 
+<!-- Temporary test: DIY HLS audio stream from the PC, as an alternative
+     to AudioRelay for phone battery reasons - not a finished feature,
+     mirrors the remote's own play/pause state, see hlsListen.js -->
+<audio id="hlsAudio" style="display:none;"></audio>
+
+<script src="/js/vendor/hls.min.js"></script>
+<script type="module" src="/js/hlsListen.js"></script>
 <script type="module" src="/js/ui.js"></script>
 
 

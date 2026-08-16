@@ -12,6 +12,7 @@
   "license": "MIT",
   "dependencies": {
     "express": "^5.2.1",
-    "playwright": "^1.62.0"
+    "playwright": "^1.62.0",
+    "ws": "^8.21.3"
   }
 }

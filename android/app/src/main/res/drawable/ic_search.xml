@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ported 1:1 from the original web client's inline SVG (public/index.html
+     #searchButton) - stroke-based Feather-style magnifier, not Material's
+     filled glyph, so it keeps the original's thin-line look. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:pathData="M18,11 C18,14.866 14.866,18 11,18 C7.134,18 4,14.866 4,11 C4,7.134 7.134,4 11,4 C14.866,4 18,7.134 18,11 Z"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M21,21 L16.65,16.65"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

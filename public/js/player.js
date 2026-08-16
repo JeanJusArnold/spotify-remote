@@ -1,4 +1,5 @@
 import * as api from "./api.js";
+import { syncHlsToPlaybackState, skipToLiveEdge } from "./hlsListen.js";
 
 export let seeking = false;
 
@@ -59,6 +60,44 @@ let coverTappedForCurrentAlbum = false;
 let currentAlbumCoverKey = "";
 
 let lastKnownTitle = null;
+let lastKnownPlaying = false;
+let lastSeenAudioReadyGeneration = null;
+
+// Without this, Chrome infers the media notification's behavior from
+// the raw <audio> element instead: it only shows the notification while
+// the tab is actually audible (muting it - see hlsListen.js's soft
+// pause - made Chrome drop the notification entirely), and its own
+// pause button calls audio.pause() directly, which the poll-driven
+// syncHlsToPlaybackState() then immediately fights by calling play()
+// again since Spotify itself never got told to pause. Declaring a real
+// Media Session routes Chrome's notification through the same /play,
+// /pause, /next, /previous the remote's own buttons use, and lets us
+// assert the playback state explicitly instead of Chrome guessing it
+// from audibility.
+function setupMediaSession() {
+
+    if (!("mediaSession" in navigator)) return;
+
+    navigator.mediaSession.setActionHandler("play", () => cmd("play"));
+    navigator.mediaSession.setActionHandler("pause", () => cmd("pause"));
+    navigator.mediaSession.setActionHandler("previoustrack", () => cmd("previous"));
+    navigator.mediaSession.setActionHandler("nexttrack", () => cmd("next"));
+
+}
+
+setupMediaSession();
+
+function updateMediaSessionMetadata(state) {
+
+    if (!("mediaSession" in navigator)) return;
+
+    navigator.mediaSession.metadata = new MediaMetadata({
+        title: state.title || "",
+        artist: state.artist || "",
+        artwork: state.cover ? [{ src: state.cover }] : []
+    });
+
+}
 
 export async function updateState() {
 
@@ -73,6 +112,19 @@ export async function updateState() {
         if (state.title !== lastKnownTitle) {
             lastKnownTitle = state.title;
             refreshContextAndQueue();
+            updateMediaSessionMetadata(state);
+        }
+
+        // decoupled from the title-change check above on purpose - the
+        // server confirms real audio separately (see /state in
+        // server.js), which can land on a later poll than the one that
+        // first showed the new title. First poll ever just establishes
+        // the baseline instead of firing a jump nothing asked for.
+        if (lastSeenAudioReadyGeneration === null) {
+            lastSeenAudioReadyGeneration = state.audioReadyGeneration;
+        } else if (state.audioReadyGeneration !== lastSeenAudioReadyGeneration) {
+            lastSeenAudioReadyGeneration = state.audioReadyGeneration;
+            skipToLiveEdge();
         }
 
         if (state.cover && state.cover !== currentAlbumCoverKey) {
@@ -83,11 +135,22 @@ export async function updateState() {
         setMarqueeText("trackText", state.title || "Aucun titre");
         setMarqueeText("artistText", state.artist || "");
 
+        lastKnownPlaying = state.playing;
+
         document.getElementById("iconPlay").style.display =
             state.playing ? "none" : "block";
 
         document.getElementById("iconPause").style.display =
             state.playing ? "flex" : "none";
+
+        syncHlsToPlaybackState(state.playing);
+
+        // asserted explicitly so Chrome keeps showing the notification
+        // in the right state regardless of the underlying <audio>
+        // element's own paused/muted state (see setupMediaSession)
+        if ("mediaSession" in navigator) {
+            navigator.mediaSession.playbackState = state.playing ? "playing" : "paused";
+        }
 
         document.getElementById("shuffleBtn").classList.toggle(
             "active", !!state.shuffle
@@ -118,6 +181,9 @@ export async function updateState() {
             updateSeekbarFill();
 
         }
+
+        // green "audio position" marker feature abandoned for now (see
+        // hlsListen.js) - kept in place, just not fed anymore
 
     }
     catch (e) {
@@ -1451,9 +1517,121 @@ export async function commitSeek() {
 
 }
 
+const playButton = document.getElementById("play");
+let shieldArmTimeout = null;
+let shieldTimeout = null;
+
+function clearShieldTimers() {
+    clearTimeout(shieldArmTimeout);
+    clearTimeout(shieldTimeout);
+}
+
+// Blocks the button for exactly as long as the server says a
+// resumeHlsEncoder transition will take (see /play in server.js) -
+// resumeHlsEncoder has no actionGeneration check, so a pause landing
+// anywhere during its wait would still send MPRIS Play once the fresh
+// instance is ready, right after Spotify was just told to stop. The
+// whole wait is the danger zone here, not just its tail, so the whole
+// thing gets shielded.
+function armShield(ms) {
+    clearShieldTimers();
+    if (!ms) return;
+    playButton.disabled = true;
+    playButton.classList.add("shielded");
+    shieldTimeout = setTimeout(() => {
+        playButton.disabled = false;
+        playButton.classList.remove("shielded");
+    }, ms);
+}
+
+// pauseSpotifyAndEncoder's own wait is mostly safe to interrupt - a
+// /play landing during it gets cleanly cancelled server-side via
+// actionGeneration, same as if the tap had never happened, so leaving
+// the button live lets a pause be undone right after tapping it. Only
+// the kill+Pause handoff at the very end of that wait is unprotected,
+// so only a short window is shielded around when that lands, not the
+// whole thing. LEAD is a bit longer than the handoff itself needs so
+// the green fill is actually perceivable as a blink rather than
+// flickering faster than the eye can register it; TAIL covers the
+// Pause command's own resolution time after the handoff (already
+// documented elsewhere as landing well under 100ms).
+const PAUSE_SHIELD_LEAD_MS = 300;
+const PAUSE_SHIELD_TAIL_MS = 100;
+
+// resumeHlsEncoder's gapless-on-resume trick (see its own comment in
+// server.js) depends on the phone having already buffered the 2 extra
+// segments the pause wait produced, so a fresh instance's short
+// spawn+inputReady window can be bridged locally. Those segments only
+// finish existing right as the pause lands - tapping play again the
+// instant the bracket above clears doesn't give the client any margin
+// to have actually fetched/buffered them yet. This cooldown keeps play
+// shielded a bit longer after landing, purely to let that catch up -
+// it does not change the mid-wait cancel behavior above at all.
+const PAUSE_RESUME_COOLDOWN_MS = 2000;
+
+function armShieldAt(landsInMs) {
+    clearShieldTimers();
+    playButton.disabled = false;
+    playButton.classList.remove("shielded");
+    if (!landsInMs) return;
+    const delay = Math.max(0, landsInMs - PAUSE_SHIELD_LEAD_MS);
+    shieldArmTimeout = setTimeout(
+        () => armShield(PAUSE_SHIELD_LEAD_MS + PAUSE_SHIELD_TAIL_MS + PAUSE_RESUME_COOLDOWN_MS),
+        delay
+    );
+}
+
 export async function cmd(action) {
-    await api.sendCommand(action);
+    const res = await api.sendCommand(action);
+    if (action === "play") {
+        const data = await res.json().catch(() => null);
+        if (data) armShield(data.shieldMs);
+    } else if (action === "pause") {
+        const data = await res.json().catch(() => null);
+        if (data) armShieldAt(data.pauseLandsInMs);
+    }
     updateState();
+}
+
+// Same explicit /play or /pause Chrome's own media notification uses
+// (see setupMediaSession) - not the server's /playpause toggle, which
+// has to guess direction from Spotify's own aria-label, and that can
+// lag behind a pause that's still waiting to land (see
+// pauseSpotifyAndEncoder in server.js). Our own last-known state here
+// is never stale like that, since we're the one who just set it.
+export function togglePlayPause() {
+    cmd(lastKnownPlaying ? "pause" : "play");
+}
+
+// Resolves a shared Spotify link to the same shape /search returns and
+// shows it in the search overlay as a single result - playing/browsing
+// only happens once actually tapped, through the exact same handlers
+// (createResultItem, via renderResults) a real search result already
+// uses, rather than acting on it automatically the moment it's shared.
+//
+// Tracks are the one exception: Spotify's own web player autoplays a
+// track page a second or so after landing on it, on its own, regardless
+// of anything tapped here (see /resolve-link in server.js) - showing a
+// card for something that's either about to start or already playing
+// would be misleading, and tapping it would hit the action-bar's
+// play/pause toggle and pause it right back off. The server already
+// arms the usual title-watch catch-up for this case, so there's nothing
+// left to do here but let the normal /state poll pick it up.
+export async function openSharedLink(text) {
+
+    try {
+
+        const result = await api.resolveLink(text);
+        if (result.type === "track") return;
+
+        setOverlayLocation("");
+        showSearchOverlay();
+        renderResults([result]);
+
+    } catch (e) {
+        console.log(e);
+    }
+
 }
 
 let pollInterval = null;

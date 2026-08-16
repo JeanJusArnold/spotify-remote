@@ -238,14 +238,27 @@ body {
 }
 
 
+.seekbar-wrap {
+
+    position:relative;
+    display:flex;
+    align-items:center;
+
+    width:90%;
+    height:16px;
+    margin:12px auto 25px;
+    flex-shrink:0;
+
+}
+
+
 #seekbar {
 
     -webkit-appearance:none;
     appearance:none;
 
-    width:90%;
-    margin:12px auto 25px;
-    flex-shrink:0;
+    width:100%;
+    margin:0;
 
     height:6px;
     border-radius:3px;
@@ -267,18 +280,21 @@ body {
 }
 
 
+/* thin line instead of a round ball, so it doesn't visually compete
+   with hlsPositionMarker (the other thin line marking where the audio
+   actually is) */
 #seekbar::-webkit-slider-thumb {
 
     -webkit-appearance:none;
     appearance:none;
 
-    width:14px;
-    height:14px;
+    width:3px;
+    height:16px;
 
-    border-radius:50%;
+    border-radius:1px;
     background:#fff;
 
-    margin-top:-4px;
+    margin-top:-5px;
     cursor:pointer;
 
 }
@@ -304,14 +320,38 @@ body {
 
 #seekbar::-moz-range-thumb {
 
-    width:14px;
-    height:14px;
+    width:3px;
+    height:16px;
 
-    border-radius:50%;
+    border-radius:1px;
     background:#fff;
     border:none;
 
     cursor:pointer;
+
+}
+
+
+/* marks where on the track the audio actually audible right now
+   corresponds to - lags behind the seekbar's own position (Spotify's
+   real-time position) because of the DIY HLS stream's buffering, see
+   hlsListen.js's getAudioLagSeconds() */
+#hlsPositionMarker {
+
+    position:absolute;
+    top:50%;
+    left:0%;
+
+    width:3px;
+    height:16px;
+
+    background:#1db954;
+    border-radius:1px;
+
+    transform:translate(-50%, -50%);
+    pointer-events:none;
+
+    display:none;
 
 }
 
@@ -356,6 +396,20 @@ button {
     height:60px;
 
     background:#fff;
+
+}
+
+
+#play:disabled {
+
+    opacity:1; /* the shielded fill itself is the disabled indicator */
+
+}
+
+
+#play.shielded {
+
+    background:#1db954;
 
 }
 

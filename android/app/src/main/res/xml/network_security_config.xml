@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The server address is a runtime-editable setting (see SettingsScreen), not
+    known at build time, so a <domain-config> scoped to one hostname isn't
+    possible - this permits cleartext app-wide instead. Still narrow in
+    practice: the app only ever talks to whatever single address the user
+    configures, and that link already goes over an encrypted Tailscale
+    (WireGuard) tunnel regardless of this app-layer setting.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

@@ -1,7 +1,9 @@
 const express = require("express");
 const { chromium } = require("playwright");
-const { execFile } = require("child_process");
+const { execFile, spawn } = require("child_process");
 const util = require("util");
+const fs = require("fs");
+const { WebSocketServer, WebSocket } = require("ws");
 
 const execFileAsync = util.promisify(execFile);
 
@@ -11,6 +13,628 @@ const path = require("path");
 app.use(express.static(path.join(__dirname, "public")));
 
 const PORT = 3000;
+
+// HTTPS (via a `tailscale cert`-issued cert for this machine's MagicDNS
+// name) used to be required here for the old PWA client's
+// installability (a secure context is mandatory for that) - now that
+// the native Android app (see [[native_app_migration]]) is the only
+// client, that requirement is gone: the app talks plain HTTP, over the
+// Tailscale (WireGuard) tunnel that's already encrypted at that layer
+// regardless of what this app-layer scheme is. Dropping TLS here is
+// also what makes pasting a bare Tailscale IP (no MagicDNS hostname,
+// which the old cert was only ever valid for) actually work - a cert
+// tied to one specific hostname can never validate against an IP.
+
+// DIY audio streaming, in progress alongside AudioRelay (not yet
+// replacing it): AudioRelay's own real-time/low-latency design keeps
+// the phone's radio and CPU constantly awake, draining battery, with no
+// hardware-decode path - measured ~150kbps, so bandwidth/codec choice
+// isn't the problem, only the real-time delivery is. This instead
+// captures the same virtual sink, encodes to Opus, and serves it as a
+// rolling HLS window - a phone-side player (ExoPlayer/Media3, not built
+// yet) can buffer far ahead, let the radio sleep between segment
+// fetches, and decode in hardware, at the cost of tolerable latency
+// (roughly segment-duration times a few, invisible for this project's
+// remote-control use case).
+const HLS_DIR = path.join(__dirname, "hls");
+// Shortened from 6s (2026-08-15): a rotation's minimum possible latency
+// is bounded by this - a segment can never close before its own nominal
+// duration elapses, regardless of how fast ffmpeg itself starts up.
+// Settled on 4s as the user's preferred latency/overhead balance.
+// HLS_LIST_SIZE below is scaled to keep roughly the same rolling-window
+// duration regardless of this value.
+const HLS_SEGMENT_SECONDS = 4;
+const HLS_LIST_SIZE = 8; // 4s * 8 = 32s window, close to the old 6s * 6 = 36s
+
+// The deferred-pause margin (see pauseSpotifyAndEncoder) targets this
+// much already-buffered runway on the client before it lets Spotify
+// actually stop - 2 segments. Also doubles as the threshold for
+// skipping the extra margin segment entirely when the client reports
+// it already has this much slack from prior drift.
+const PAUSE_MARGIN_TARGET_MS = HLS_SEGMENT_SECONDS * 1000 * 2;
+
+// Single, persistent sink - always linked to the real audio chain (the
+// last hop of the existing EasyEffects processing, set up outside this
+// repo - see [[pipewire_chromium_routing_drift]]). Never switched or
+// touched by this project; see the encoder-rotation design below for why
+// that's no longer needed.
+//
+// The encoder used to also rotate at every track transition (two
+// dedicated sinks, alternating, switched via pw-link at the detected
+// title-change moment) - abandoned 2026-08-15. Two real problems, not
+// one: (1) the title text is not a reliable proxy for the true audio
+// boundary - Spotify's crossfade/gapless timing means the title can
+// settle before OR after real audio actually changes, so cutting the
+// outgoing instance off at the detected moment sometimes truncated the
+// new track's own first notes, confirmed live as reported "silence,
+// sometimes just a cut, sometimes I don't hear the very first notes at
+// all". (2) even a perfectly-timed cut would land IN THE MUSIC, not in
+// a genuine gap - Spotify's transitions are usually gapless/crossfaded,
+// so there generally isn't a quiet moment near a title change to exploit
+// either. See [[dual_instance_hls_handoff]] for that whole
+// investigation's history.
+//
+// The actual redesign: rotation is now tied to pause/resume instead of
+// track transitions - see pauseSpotifyAndEncoder/resumeHlsEncoder. Since
+// those are actions this server itself initiates (both the MPRIS command
+// AND the encoder's own state), there's no title-lag/detection-race to
+// fight at all - full control over both sides of the synchronization.
+// Track transitions now get NO intervention whatsoever: the single
+// active instance just keeps recording Chromium's raw output straight
+// through, gapless/crossfaded/hard-cut, whatever Spotify actually does -
+// which was never the source of the original glitch in the first place
+// (that traced back to the OLD client's live-edge SEEKING landing badly
+// in an otherwise-fine continuous stream, not to the raw content itself
+// - see [[precise_segment_live_edge_seek]]).
+const HLS_SINK = "spotify-remote-audio";
+
+// Starting the encoder on a fixed guessed delay after telling Spotify
+// to play was unreliable - Chromium's own audio pipeline startup isn't
+// instant and its real latency varies, so a fixed delay either caught a
+// beat of silence (too short) or added needless lag (too long). This
+// instead probes the actual sink with a short ffmpeg volumedetect pass
+// and only starts the encoder once real signal is measured. Confirmed
+// thresholds on this system: true silence measures -91dB, real
+// playback -19dB - -45dB sits with a lot of margin on both sides. Only
+// used at boot (see startEncoderOnceAudioIsReal) - a regular /play
+// commands Spotify itself, so it doesn't need to probe for signal that
+// it's about to cause anyway, see resumeHlsEncoder.
+const AUDIO_SIGNAL_THRESHOLD_DB = -45;
+const AUDIO_SIGNAL_PROBE_SECONDS = 0.15;
+const AUDIO_SIGNAL_POLL_INTERVAL_MS = 150;
+// safety net in case Spotify never actually starts producing sound
+// (track failed to load, etc.) - don't leave the encoder waiting forever
+const AUDIO_SIGNAL_WAIT_TIMEOUT_MS = 4000;
+
+function probeHasAudioSignal() {
+    return new Promise((resolve) => {
+        execFile("ffmpeg", [
+            "-f", "pulse", "-i", `${HLS_SINK}.monitor`,
+            "-t", String(AUDIO_SIGNAL_PROBE_SECONDS),
+            "-af", "volumedetect",
+            "-f", "null", "-"
+        ], (error, stdout, stderr) => {
+            const match = stderr.match(/mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB/);
+            resolve(!!match && parseFloat(match[1]) > AUDIO_SIGNAL_THRESHOLD_DB);
+        });
+    });
+}
+
+async function waitForAudioSignal() {
+    const start = Date.now();
+    while (Date.now() - start < AUDIO_SIGNAL_WAIT_TIMEOUT_MS) {
+        if (await probeHasAudioSignal()) return;
+        await new Promise(r => setTimeout(r, AUDIO_SIGNAL_POLL_INTERVAL_MS));
+    }
+}
+
+app.use("/hls", express.static(HLS_DIR));
+
+// HLS only ever delivers whole, completed segments - the client can't
+// see a segment that's still being written. Tracking when each segment
+// actually started lets pausing wait for just the remainder of the
+// current one instead of a blind full segment's worth - see
+// msUntilCurrentSegmentCompletes().
+let lastSegmentBoundaryTime = Date.now();
+const SEGMENT_COMPLETE_MARGIN_MS = 400; // encode/flush/playlist-write isn't instant once the segment's nominal duration is up
+
+// Resolves the moment the manifest file itself next changes - i.e. a
+// segment just closed. Deliberately not keyed off segment file
+// CREATION the way watchHlsSegmentBoundaries below is: a file appears
+// at the START of its ~4s writing window, well before it's actually
+// complete - ffmpeg only rewrites the manifest once a segment is fully
+// closed, so reacting to THAT event is the real, unambiguous completion
+// signal. The event-driven building block pauseSpotifyAndEncoder uses
+// to wait for real segment-close boundaries instead of guessing from a
+// timer (see [[precise_segment_live_edge_seek]] for why a time guess
+// isn't good enough here).
+// generous safety net in case the encoder is somehow stuck and never
+// closes another segment (shouldn't happen - a fresh instance every
+// resume avoids the old long-uptime manifest-duration-drift bug - but
+// pauseSpotifyAndEncoder must never hang forever waiting for this)
+const MANIFEST_UPDATE_WAIT_TIMEOUT_MS = HLS_SEGMENT_SECONDS * 1000 * 3;
+
+function waitForNextManifestUpdate() {
+    return new Promise((resolve) => {
+        const watcher = fs.watch(HLS_DIR, (eventType, filename) => {
+            if (filename !== "stream.m3u8") return;
+            watcher.close();
+            clearTimeout(timeout);
+            resolve();
+        });
+        const timeout = setTimeout(() => { watcher.close(); resolve(); }, MANIFEST_UPDATE_WAIT_TIMEOUT_MS);
+    });
+}
+
+// Only ever needs to run once (a single fs.watch stays alive and keeps
+// firing for the whole process lifetime) - but is called from both
+// startFreshHlsPipeline (boot, or after a pause fully stopped the
+// encoder) and resumeHlsEncoder (spawning directly, not through
+// startFreshHlsPipeline). Confirmed live (2026-08-15): without this
+// guard, a session that boots with Spotify already paused (so
+// startFreshHlsPipeline never runs) never wires this up at all,
+// leaving lastSegmentBoundaryTime stuck at module-load time forever -
+// harmless for the event-driven pause wait itself (that uses
+// waitForNextManifestUpdate, not this), but wrong for /pause's
+// reported pauseLandsInMs estimate.
+let segmentBoundaryWatcherStarted = false;
+
+function watchHlsSegmentBoundaries() {
+    if (segmentBoundaryWatcherStarted) return;
+    segmentBoundaryWatcherStarted = true;
+    fs.mkdirSync(HLS_DIR, { recursive: true });
+    fs.watch(HLS_DIR, (eventType, filename) => {
+        if (!filename || !/^seg-g\d+-\d+\.m4s$/.test(filename)) return;
+        // fs.watch fires for both creation and deletion (delete_segments
+        // cleans up old ones) - only a real creation marks a new
+        // boundary
+        if (fs.existsSync(path.join(HLS_DIR, filename))) {
+            lastSegmentBoundaryTime = Date.now();
+        }
+    });
+}
+
+function msUntilCurrentSegmentCompletes() {
+    const elapsed = Date.now() - lastSegmentBoundaryTime;
+    const remaining = HLS_SEGMENT_SECONDS * 1000 - elapsed;
+    return Math.max(0, remaining) + SEGMENT_COMPLETE_MARGIN_MS;
+}
+
+// spawn() children aren't tied to the parent's lifetime - killing this
+// node process (even just Ctrl-C) left ffmpeg running orphaned in the
+// background, and every restart piled up another one, all fighting over
+// the same output directory (confirmed: found 4 running at once after a
+// few restarts, explaining garbled/out-of-order segments). Make sure it
+// actually dies with us, on any of the ways this process can end - see
+// stopAllEncoderInstances/process.on below.
+//
+// Only ever one of these alive at a time now - pause fully kills the
+// current instance (after a couple of clean segment boundaries, see
+// pauseSpotifyAndEncoder) rather than freezing it, and resume always
+// spawns a genuinely fresh one (see resumeHlsEncoder), never
+// overlapping. Each generation still gets its own incrementing id, used
+// for its filename prefix (see spawnEncoderInstance), so append_list
+// keeps extending the SAME manifest across a pause/resume cycle instead
+// of the client seeing the stream restart from scratch.
+let encoderGeneration = 0;
+let currentInstance = null;
+
+function segmentPrefixFor(generation) {
+    return `seg-g${generation}-`;
+}
+
+function initFilenameFor(generation) {
+    return `init-g${generation}.mp4`;
+}
+
+function spawnEncoderInstance(sinkName) {
+
+    const generation = ++encoderGeneration;
+    const segmentPrefix = segmentPrefixFor(generation);
+
+    const ffmpeg = spawn("ffmpeg", [
+        "-f", "pulse", "-i", `${sinkName}.monitor`,
+        // 128k matches, not wastes: the Spotify Web Player itself caps
+        // streaming quality around 128kbps regardless of account tier -
+        // unlike native apps, it has no "Très élevée"/~320kbps option -
+        // so encoding above that here would just be re-inflating an
+        // already-capped source, not preserving extra fidelity
+        "-acodec", "aac", "-b:a", "128k",
+        "-f", "hls",
+        "-hls_time", String(HLS_SEGMENT_SECONDS),
+        "-hls_list_size", String(HLS_LIST_SIZE),
+        // append_list: continue the existing manifest (if any) instead
+        // of truncating it - validated separately (including
+        // concurrently with an outgoing instance still alive and
+        // writing) not to corrupt or collide; confirmed harmless to use
+        // unconditionally even for the very first instance ever spawned
+        // (nothing to append to yet, so it just behaves as a fresh
+        // manifest)
+        //
+        // 2026-08-16: briefly dropped this to fix a click at the
+        // generation boundary (ffmpeg only ever writes ONE #EXT-X-MAP
+        // at the top of the manifest, so appending a new generation's
+        // segments onto the outgoing one's still-unevicted tail left
+        // old segments - genuinely encoded against a DIFFERENT
+        // init-gN.mp4 - claimed under the new generation's map, an
+        // audible click at the crossover). Reverted immediately:
+        // without append_list every resume starts the manifest over
+        // with just 1 segment in the window, and it takes the full
+        // hls_list_size*HLS_SEGMENT_SECONDS (~32s) to refill - confirmed
+        // live this made the post-resume gap much WORSE, not better
+        // (the live client needs real window depth to establish its
+        // live edge at all). Kept append_list for the depth; the map
+        // mismatch itself is still unresolved as of this revert.
+        "-hls_flags", "append_list+delete_segments+omit_endlist",
+        // fMP4/CMAF segments, not classic .ts - AAC-in-TS would also be
+        // fine, but fMP4 is already known-working and there's no reason
+        // to touch the container while only swapping the audio codec
+        "-hls_segment_type", "fmp4",
+        "-hls_fmp4_init_filename", initFilenameFor(generation),
+        // append_list computes the REAL start number itself, live, off
+        // however many entries are actually in the manifest at THIS
+        // process's own init time (not at spawn() time) - confirmed via
+        // the scratch testing that this self-adjusts correctly even if
+        // an outgoing instance keeps appending more of its own entries
+        // during this process's startup, so there's no need to compute
+        // or pass a real offset here
+        "-start_number", "0",
+        "-hls_segment_filename", path.join(HLS_DIR, `${segmentPrefix}%03d.m4s`),
+        path.join(HLS_DIR, "stream.m3u8")
+    ]);
+
+    const log = fs.createWriteStream(path.join(__dirname, "hls-encoder.log"), { flags: "a" });
+    ffmpeg.stderr.pipe(log);
+
+    // Resolves once ffmpeg's own stderr confirms it has actually opened
+    // the pulse input (registered as a client, ready to consume samples
+    // the instant they arrive) - resumeHlsEncoder awaits this before
+    // ever telling Spotify to actually play, guaranteeing something is
+    // always there to capture from the very first real sample (no
+    // late-arriving-reader gap, since this project itself controls both
+    // sides of that timing now - see resumeHlsEncoder's own comment).
+    let resolveInputReady;
+    const inputReady = new Promise((resolve) => { resolveInputReady = resolve; });
+    let stderrSoFar = "";
+    const inputReadyListener = (chunk) => {
+        if (!resolveInputReady) return;
+        stderrSoFar += chunk.toString();
+        if (stderrSoFar.includes("Input #0, pulse, from")) {
+            resolveInputReady();
+            resolveInputReady = null;
+        }
+    };
+    ffmpeg.stderr.on("data", inputReadyListener);
+
+    const instance = { generation, sinkName, segmentPrefix, process: ffmpeg, exited: false, inputReady };
+
+    ffmpeg.on("exit", (code, signal) => {
+        instance.exited = true;
+        console.error(`HLS encoder gen=${generation} exited (code=${code}, signal=${signal})`);
+        // safety net - if ffmpeg died before ever opening its input,
+        // don't leave resumeHlsEncoder waiting on a promise that can
+        // never resolve
+        if (resolveInputReady) resolveInputReady();
+    });
+
+    return instance;
+
+}
+
+// safety net for spawnEncoderInstance's inputReady - normally resolves
+// in well under a second; this only kicks in if ffmpeg is somehow
+// unusually slow to even open its input, so it can be generous
+const ENCODER_INPUT_READY_TIMEOUT_MS = 5000;
+
+function waitForEncoderInputReady(instance) {
+    return Promise.race([
+        instance.inputReady,
+        new Promise((resolve) => setTimeout(resolve, ENCODER_INPUT_READY_TIMEOUT_MS))
+    ]);
+}
+
+// Must run exactly once per real server process start, regardless of
+// whether Spotify happens to be playing or paused at that moment -
+// confirmed live (2026-08-15): a restart landing while paused used to
+// skip this entirely (only startFreshHlsPipeline cleared the directory,
+// and that path only ran if Spotify was already playing at boot), so a
+// later /play would append_list onto whatever manifest/segments a
+// PREVIOUS, unrelated server process had left behind - harmless-looking
+// in the manifest text, but a real risk of two different processes'
+// generation counters (each starting fresh at 1 in memory) eventually
+// colliding on the same filename.
+function clearStaleHlsDir() {
+    fs.mkdirSync(HLS_DIR, { recursive: true });
+    for (const f of fs.readdirSync(HLS_DIR)) fs.unlinkSync(path.join(HLS_DIR, f));
+}
+
+// Only for a genuinely fresh pipeline start (boot, or nothing alive to
+// resume from - see resumeHlsEncoder) - starts the very first instance.
+function startFreshHlsPipeline() {
+    watchHlsSegmentBoundaries();
+    currentInstance = spawnEncoderInstance(HLS_SINK);
+}
+
+// Only used at boot - see HLS_SINK's own comment for why a regular
+// resume doesn't need this
+async function startEncoderOnceAudioIsReal() {
+    await waitForAudioSignal();
+    startFreshHlsPipeline();
+}
+
+function stopAllEncoderInstances() {
+    // SIGTERM (kill()'s default) is queued, not acted on, by a process
+    // currently stopped via SIGSTOP - could still happen to be true for
+    // an instance mid-shutdown some other way, so keep using SIGKILL,
+    // which works unconditionally regardless of stop state.
+    if (currentInstance && !currentInstance.exited) currentInstance.process.kill("SIGKILL");
+}
+
+// Any file left behind whose generation isn't the currently alive
+// instance's, and isn't referenced by the current manifest, is a
+// leftover with no future use - either an older generation's segments
+// that delete_segments already evicted from the manifest text but never
+// deleted from disk (confirmed via earlier scratch testing: it only
+// trims manifest entries, not files), or a killed instance's own final,
+// unfinished segment from the moment it got killed mid-write (never
+// referenced - see spawnEncoderInstance's own comment on why that's
+// always safe).
+function sweepOrphanedSegmentFiles() {
+
+    let manifestText = "";
+    try { manifestText = fs.readFileSync(path.join(HLS_DIR, "stream.m3u8"), "utf8"); } catch {}
+
+    const keepGeneration = currentInstance?.generation;
+
+    for (const f of fs.readdirSync(HLS_DIR)) {
+        const match = f.match(/^(?:seg-g(\d+)-\d+|init-g(\d+))\.(?:m4s|mp4)$/);
+        if (!match) continue;
+        const generation = Number(match[1] ?? match[2]);
+        if (generation === keepGeneration) continue;
+        if (manifestText.includes(f)) continue;
+        try { fs.unlinkSync(path.join(HLS_DIR, f)); } catch {}
+    }
+
+}
+
+// /state must still report the user's actual intent right away, or a
+// client keeps seeing "still playing" for the whole delay below and
+// never updates the icon. null = no override, report Spotify's real
+// aria-label as-is.
+let pendingPlayingIntent = null;
+
+// WebSocket clients connected to /state-stream (see its own comment
+// near the WebSocketServer setup) - pushed to directly instead of each
+// client having to poll /state on its own schedule.
+const wsClients = new Set();
+
+// Compared against on every push to decide whether anything actually
+// changed - position deliberately excluded (see pushStateIfChanged's
+// own comment for why), so this only reflects title/artist/playing/
+// duration/cover/shuffle/repeat.
+let lastPushedDedupJson = null;
+
+// position/playing/wall-clock-time at the last actual push - used only
+// to detect a backward jump (see pushStateIfChanged below), not part of
+// the dedup comparison itself. Tracking the timestamp and playing flag
+// alongside the position (not just the raw position) matters: pushes can
+// be minutes apart when nothing dedup-worthy happens, so the raw
+// last-pushed position alone goes stale almost immediately once playback
+// keeps ticking past it - comparing a fresh scrape against that stale
+// number made a real restart-to-0 look like it landed *above*, not
+// below, an old near-zero baseline from whenever the track started.
+let lastPushedPositionSeconds = null;
+let lastPushedPositionAtMs = null;
+let lastPushedWasPlaying = false;
+
+function parsePositionSeconds(text) {
+    const [minutes, seconds] = text.split(":").map(Number);
+    if (Number.isNaN(minutes) || Number.isNaN(seconds)) return null;
+    return minutes * 60 + seconds;
+}
+
+// Re-scrapes and pushes the current state to every connected client,
+// but only if it actually changed since the last push, EXCLUDING
+// position from that comparison - confirmed live: Spotify's own
+// position text ticks every second, which the DOM observer below picks
+// up as a real mutation just as readily as an actual title change,
+// and without this exclusion that meant a push every ~1s regardless of
+// whether anything a client would care about actually changed, no
+// better than the polling this whole thing replaced. Position still
+// rides along in the payload itself (clients need a starting point),
+// it just isn't what decides whether to send one - clients extrapolate
+// position locally between real pushes instead.
+//
+// A backward jump in position is the one exception that still forces a
+// push even with every dedup field unchanged - confirmed live: /previous
+// restarting the current track (Spotify/MPRIS's own standard "restart if
+// more than a few seconds in" behavior, not something this app
+// implements itself) changes only position, nothing else, so the dedup
+// check alone would silently swallow it and leave clients extrapolating
+// forward from the stale pre-restart position forever. Compared against
+// the *expected* current position (last pushed position + real elapsed
+// time since, while playing) rather than the raw last-pushed position -
+// otherwise, since real pushes can be minutes apart, a fresh scrape
+// naturally ends up far ahead of a long-stale last-pushed number even
+// with nothing anomalous going on, which either misses a real restart
+// (if the restart lands above the stale baseline) or false-positives on
+// every single push (if compared carelessly the other way). Real
+// playback position only ever matches its own expected value between
+// pushes, so a meaningful shortfall (tolerance for scrape-timing noise,
+// not a real threshold) is unambiguous.
+async function pushStateIfChanged() {
+    const state = applyPendingIntent(await scrapeState());
+    const { position, ...dedupFields } = state;
+    const dedupJson = JSON.stringify(dedupFields);
+    const positionSeconds = parsePositionSeconds(position);
+    let wentBackward = false;
+    if (lastPushedPositionSeconds !== null && positionSeconds !== null) {
+        const elapsedSeconds = lastPushedWasPlaying
+            ? (Date.now() - lastPushedPositionAtMs) / 1000
+            : 0;
+        const expectedPositionSeconds = lastPushedPositionSeconds + elapsedSeconds;
+        wentBackward = positionSeconds < expectedPositionSeconds - 2;
+    }
+    if (dedupJson === lastPushedDedupJson && !wentBackward) return;
+    lastPushedDedupJson = dedupJson;
+    lastPushedPositionSeconds = positionSeconds;
+    lastPushedPositionAtMs = Date.now();
+    lastPushedWasPlaying = state.playing;
+    const json = JSON.stringify(state);
+    for (const client of wsClients) {
+        if (client.readyState === WebSocket.OPEN) client.send(json);
+    }
+}
+
+// Bumped by every /play and /pause call, and snapshotted by
+// pauseSpotifyAndEncoder()/resumeHlsEncoder() below at the start of
+// their waits - if a play lands while a pause is still waiting out its
+// segment margin (or vice versa), this changes out from under the
+// stale one, letting it tell it's been superseded and back off instead
+// of acting on a tap that's no longer the user's actual intent.
+let actionGeneration = 0;
+
+// Pause used to just freeze the encoder (SIGSTOP) at the current
+// segment boundary and pause Spotify at the same instant - simple, but
+// meant resume had to un-suspend that same frozen process, which this
+// project's own dual-instance work (see [[dual_instance_hls_handoff]])
+// showed doesn't compose well with wanting a fresh, reliably-timed
+// instance on every resume.
+//
+// Redesigned 2026-08-15 around the fact that pause/resume are the one
+// place this server can control BOTH sides of the timing - its own
+// MPRIS command AND its own encoder state - unlike a track transition,
+// where Spotify's internal crossfade timing is opaque. Pause: let the
+// current instance keep capturing real audio for its current segment
+// AND one more full one (event-driven waits, see
+// waitForNextManifestUpdate - not a blind sleep), THEN send the MPRIS
+// pause and kill it. The phone perceives the pause immediately (state.
+// playing flips right away - see pendingPlayingIntent below) but keeps
+// buffering in the background while paused, so those two extra real
+// segments end up already sitting in its own local buffer. Resume:
+// spawn a brand new instance, wait for it to confirm it's actually
+// consuming (inputReady) before ever sending MPRIS play - guaranteeing
+// nothing is lost from the very first sample once Spotify starts making
+// sound again. Between the two: the phone plays out its own
+// already-buffered tail (those 2 segments) while the fresh instance
+// spins up in the background, so a normal-length pause is perceived as
+// gapless on resume without needing any precise cross-device timing at
+// all - see [[dual_instance_hls_handoff]] for the full reasoning trail.
+//
+// STALE as of 2026-08-16: PlaybackService.applyLocalPlaying now fully
+// re-prepares the player on every resume (its own comment explains why -
+// a bare playWhenReady=true stopped picking up the new generation after
+// a long pause), which throws away whatever buffered tail it had and
+// re-fetches the manifest fresh instead. The "no precise cross-device
+// timing needed" part above no longer describes the client's real
+// behavior - a fresh fetch can land mid-crossover-window on a segment
+// whose real init segment doesn't match what the manifest's single
+// #EXT-X-MAP claims at that instant (see spawnEncoderInstance's
+// append_list comment) - still unresolved.
+//
+// Made adaptive 2026-08-15: real Spotify audio keeps playing for this
+// entire wait, while the phone's own audible output already stopped
+// the instant the tap landed (pendingPlayingIntent, right below) - so
+// every pause, by construction, pushes the phone's live offset further
+// behind real time by up to however long this wait takes. An
+// unconditional 2-segment wait would make that drift only ever grow
+// over a session with many taps. The client already knows its own
+// current live offset (Media3's currentLiveOffset) and reports it as
+// clientLiveOffsetMs - if it's already at least PAUSE_MARGIN_TARGET_MS
+// behind, it already has all the buffered runway this margin exists to
+// build up, so the extra segment is skipped and only the in-flight one
+// is finished (never skipped - killing ffmpeg mid-segment would leave
+// a corrupt tail). This is what actually keeps the drift bounded
+// instead of growing with every pause, with no playback-speed/pitch
+// manipulation involved at all.
+async function pauseSpotifyAndEncoder(clientLiveOffsetMs = 0) {
+
+    const myGeneration = actionGeneration;
+    const skipExtraMargin = clientLiveOffsetMs >= PAUSE_MARGIN_TARGET_MS;
+
+    if (currentInstance && !currentInstance.exited) {
+        await waitForNextManifestUpdate(); // finish whatever segment is already in progress
+        if (myGeneration !== actionGeneration) return;
+        if (!skipExtraMargin) {
+            await waitForNextManifestUpdate(); // one more full segment of margin - skipped when the client already has enough slack from prior drift
+        }
+    }
+
+    // a play (or another pause) landed while the above was waiting -
+    // whichever it was already handled things its own way, this stale
+    // pause has nothing left to correctly do
+    if (myGeneration !== actionGeneration) return;
+
+    let ok = await mprisCommand("Pause");
+    if (!ok) {
+        const alreadyPlaying = (await controls.playPause.getAttribute("aria-label")) === "Pause";
+        if (alreadyPlaying) await controls.playPause.click({ noWaitAfter: true });
+    }
+
+    if (currentInstance && !currentInstance.exited) currentInstance.process.kill("SIGKILL");
+    currentInstance = null;
+
+    // Not re-pushed here on purpose - confirmed live this was a real
+    // race: pendingPlayingIntent clearing right as the real MPRIS pause
+    // command goes out, before Spotify's own aria-label has necessarily
+    // caught up yet, meant scrapeState() could momentarily read the
+    // still-stale "Pause" label and push a spurious playing:true that
+    // self-corrected ~300ms later once the DOM observer caught the real
+    // change. /pause's own route handler already pushed the false
+    // intent the instant it was set; nothing here actually changed from
+    // a client's perspective, so there's nothing that needs pushing
+    // again - the DOM observer picks up Spotify's own real confirmation
+    // on its own once it actually happens.
+    pendingPlayingIntent = null;
+    selfHealTowards(false);
+
+}
+
+// Shared by resumeHlsEncoder and /next /previous below - all three need
+// "make sure something is capturing before Spotify might start making
+// sound", they just differ in which MPRIS command actually unblocks
+// that sound. No-op if an instance is already running - either
+// playback never actually stopped (a pending pause got superseded) or
+// there's simply nothing to spawn for. Otherwise, spawns fresh and
+// waits for it to actually be consuming (inputReady) before returning -
+// same ordering as the spawn-before-link fix this project already hit
+// once (see [[dual_instance_hls_handoff]]), applied here to whichever
+// command is about to make Spotify produce real audio again.
+async function ensureEncoderRunning() {
+
+    if (currentInstance && !currentInstance.exited) return;
+
+    watchHlsSegmentBoundaries();
+
+    const incoming = spawnEncoderInstance(HLS_SINK);
+    currentInstance = incoming;
+
+    await waitForEncoderInputReady(incoming);
+    sweepOrphanedSegmentFiles();
+
+}
+
+async function resumeHlsEncoder() {
+
+    await ensureEncoderRunning();
+
+    // sent unconditionally, even if nothing needed spawning above (i.e.
+    // Spotify was already genuinely playing) - MPRIS Play is a no-op on
+    // an already-playing player, confirmed live, so there's no need to
+    // track "did we actually need to do anything" separately
+    let ok = await mprisCommand("Play");
+    if (!ok) {
+        const alreadyPlaying = (await controls.playPause.getAttribute("aria-label")) === "Pause";
+        if (!alreadyPlaying) await controls.playPause.click({ noWaitAfter: true });
+    }
+
+    selfHealTowards(true);
+
+}
+
+process.on("exit", stopAllEncoderInstances);
+process.on("SIGINT", () => { stopAllEncoderInstances(); process.exit(); });
+process.on("SIGTERM", () => { stopAllEncoderInstances(); process.exit(); });
 
 let page;
 let controls = {};
@@ -250,19 +874,6 @@ async function ensureFrenchLocale(id) {
 }
 
 
-// Chromium's MPRIS D-Bus service (org.mpris.MediaPlayer2.chromium.
-// instanceXXXXX) is unreliable for roughly the first minute after a
-// fresh Chromium/tab launch - it can be briefly unregistered while the
-// tab's media session is still settling, so the first playpause of a
-// session can find nothing to talk to over D-Bus and silently fail. A
-// real click on Spotify's own button doesn't depend on that service at
-// all (it's the same thing a manual mouse click does), so it's used as
-// a fallback whenever MPRIS isn't there to answer
-async function playPauseFallback() {
-    await controls.playPause.click({ noWaitAfter: true });
-    return true;
-}
-
 // gdbus can report success on a stale/idle MPRIS interface without any
 // real effect - confirmed case: after the minimal session sits idle for
 // a while, waking it (mouse/keyboard) leaves MPRIS commands acknowledged
@@ -274,49 +885,20 @@ async function playPauseFallback() {
 // observed to land in well under 100ms.
 const SELF_HEAL_DELAY_MS = 100;
 
-function selfHealPlayPauseIfUnchanged(before) {
-    setTimeout(async () => {
-        try {
-            const after = await controls.playPause.getAttribute("aria-label");
-            if (after === before) await playPauseFallback();
-        } catch (e) { /* page navigated away or similar - nothing to heal */ }
-    }, SELF_HEAL_DELAY_MS);
-}
-
-app.get("/playpause", async (req, res) => {
-
-    const start = performance.now();
-
-    const before = await controls.playPause.getAttribute("aria-label");
-    let ok = await mprisCommand("PlayPause");
-    if (!ok) ok = await playPauseFallback();
-
-    const end = performance.now();
-
-    console.log(
-        "Playpause total:",
-        (end - start).toFixed(2),
-        "ms"
-    );
-
-    res.send(ok ? "ok" : "mpris unavailable");
-
-    if (ok) selfHealPlayPauseIfUnchanged(before);
-});
-
-// Explicit (non-toggling) play/pause, for callers that know the state
-// they want rather than just wanting to flip it (e.g.
-// audiorelay-mpris-bridge.sh, reacting to AudioRelay's own connect/
-// disconnect) - PlayPause's fallback above doesn't fit here since
-// blindly clicking when already in the target state would flip it the
-// wrong way instead of doing nothing. The fallback itself still matters
-// here just as much: right after a fresh Chromium launch nothing has
-// played yet, so Chromium hasn't registered its MPRIS interface at all,
-// and mprisCommand() below would otherwise just fail silently until
-// someone clicks play by hand once.
-// Same "acknowledged but no real effect" gap as /playpause above - the
-// target state is known here, so healing just means checking that state
-// was actually reached, in the background, after responding.
+// /play and /pause are the only entry points now - both the remote's
+// own button and Chrome's media notification (see setupMediaSession in
+// player.js) call whichever one matches their own last-known state
+// directly, rather than a single toggle route guessing direction from
+// Spotify's own aria-label. That guess used to be wrong whenever a
+// pause was still waiting to land (see pauseSpotifyAndEncoder above) -
+// Spotify's real button can keep saying "Pause" (= currently playing)
+// for a few seconds after the tap, so a quick second tap meant as
+// "resume" got misread as "pause" again.
+//
+// Explicit, non-toggling commands also just suit a client that already
+// knows the state it wants better than a toggle would - blindly
+// flipping would risk acting on a state that's since moved on, whereas
+// calling the wrong one of these two just does nothing.
 function selfHealTowards(targetIsPlaying) {
     setTimeout(async () => {
         try {
@@ -326,43 +908,123 @@ function selfHealTowards(targetIsPlaying) {
     }, SELF_HEAL_DELAY_MS);
 }
 
+// How long the remote's own play/pause button needs to stay disabled
+// after this tap - see armShield()/armShieldAt() in player.js.
+// resumeHlsEncoder now sends the actual MPRIS "Play" command itself,
+// only once its fresh instance confirms it's ready (see that function's
+// own comment) - so the entire spawn+inputReady wait is the danger zone
+// to shield, not just a probe wait, and resumeHlsEncoder has no
+// actionGeneration check either (same reasoning as before: a pause
+// landing during the wait doesn't get cancelled, it just sends Play
+// anyway once ready - the shield is what's relied on to keep this rare
+// in practice).
 app.get("/play", async (req, res) => {
-    let ok = await mprisCommand("Play");
-    if (!ok) {
-        const alreadyPlaying =
-            (await controls.playPause.getAttribute("aria-label")) === "Pause";
-        if (!alreadyPlaying) await controls.playPause.click({ noWaitAfter: true });
-        ok = true;
-    }
-    res.send(ok ? "ok" : "mpris unavailable");
 
-    selfHealTowards(true);
+    actionGeneration++;
+    pendingPlayingIntent = null;
+    pushStateIfChanged();
+
+    const shieldMs = (currentInstance && !currentInstance.exited)
+        ? 0
+        : ENCODER_INPUT_READY_TIMEOUT_MS;
+
+    res.json({ ok: true, shieldMs });
+
+    resumeHlsEncoder();
 });
 
+// pauseSpotifyAndEncoder's own wait doesn't need shielding for most of
+// its length - a /play landing during it already gets cleanly
+// cancelled via actionGeneration further down, no different than if
+// the tap had never happened. Only the kill+mprisCommand("Pause")
+// handoff right at the very end is unprotected, so this reports when
+// that handoff will land (roughly - the actual wait is event-driven,
+// see waitForNextManifestUpdate, this is just an estimate for the
+// client's own shield timing) rather than a duration to shield right
+// away - see armShieldAt in player.js, which arms a short window
+// around that instant instead of the whole wait.
+//
+// liveOffsetMs is the client's own current distance from the live edge
+// (Media3's currentLiveOffset, or equivalent) - see
+// pauseSpotifyAndEncoder's own comment for why this is what makes the
+// margin adaptive instead of a fixed 2 segments every time. Missing or
+// unparsable defaults to 0, i.e. the original always-take-the-full-
+// margin behavior.
 app.get("/pause", async (req, res) => {
-    let ok = await mprisCommand("Pause");
-    if (!ok) {
-        const alreadyPlaying =
-            (await controls.playPause.getAttribute("aria-label")) === "Pause";
-        if (alreadyPlaying) await controls.playPause.click({ noWaitAfter: true });
-        ok = true;
-    }
-    res.send(ok ? "ok" : "mpris unavailable");
 
-    selfHealTowards(false);
+    actionGeneration++;
+    pendingPlayingIntent = false;
+    pushStateIfChanged();
+
+    const clientLiveOffsetMs = Number(req.query.liveOffsetMs) || 0;
+    const skipExtraMargin = clientLiveOffsetMs >= PAUSE_MARGIN_TARGET_MS;
+
+    const pauseLandsInMs = (currentInstance && !currentInstance.exited)
+        ? msUntilCurrentSegmentCompletes() + (skipExtraMargin ? 0 : HLS_SEGMENT_SECONDS * 1000)
+        : 0;
+
+    res.json({ ok: true, pauseLandsInMs });
+    pauseSpotifyAndEncoder(clientLiveOffsetMs);
+
 });
 
+// Confirmed live (2026-08-15): Spotify auto-resumes on Next/Previous
+// even from a fully paused state (MPRIS PlaybackStatus flips straight
+// to Playing) - it doesn't just change track and stay paused like a
+// typical media player would. Two consequences, both fixed here:
+// (1) ensureEncoderRunning must run BEFORE the real MPRIS command,
+// same spawn-before-audio-flows ordering as resumeHlsEncoder, or the
+// new track's audio has nowhere to go at all - confirmed live: real
+// Spotify audio playing, zero ffmpeg process, phone stuck silent until
+// a manual /play rescued it. (2) actionGeneration/pendingPlayingIntent
+// are reset the same way /play does it, since a still-pending deferred
+// pause must not land after this - without it, tapping Next during a
+// pause's wait let the pause fire anyway a few seconds later and cut
+// the new track right back off, and /state kept reporting paused
+// forever after (pauseSpotifyAndEncoder only resets
+// pendingPlayingIntent on the branch that reaches the end of its own
+// wait, which a cancelled-via-actionGeneration early return skips).
+// Everything below actionGeneration++ can throw (stale page/controls
+// after a Chromium crash, ensureEncoderRunning's ffmpeg spawn, etc.) -
+// unlike /play, this used to await the whole chain before ever calling
+// res.send(), so a throw here left the request hanging forever with no
+// response at all (confirmed live via server.log: "Target page, context
+// or browser has been closed" from a stale page after a Chromium crash,
+// with no res.send() ever reached). Wrapped so the client always gets a
+// response - a real error surfaces as a fast 500 instead of a silent
+// timeout.
 app.get("/next", async (req, res) => {
-    let ok = await mprisCommand("Next");
-    if (!ok) ok = await controls.next.click({ noWaitAfter: true }).then(() => true);
-    res.send(ok ? "ok" : "mpris unavailable");
+    actionGeneration++;
+    pendingPlayingIntent = null;
+    try {
+        await ensureEncoderRunning();
+        pushStateIfChanged();
+        let ok = await mprisCommand("Next");
+        if (!ok) ok = await controls.next.click({ noWaitAfter: true }).then(() => true);
+        res.send(ok ? "ok" : "mpris unavailable");
+        selfHealTowards(true);
+    } catch (e) {
+        console.error("/next failed:", e.message);
+        res.status(500).send("error");
+    }
 });
 
 
+// same reasoning as /next above
 app.get("/previous", async (req, res) => {
-    let ok = await mprisCommand("Previous");
-    if (!ok) ok = await controls.previous.click({ noWaitAfter: true }).then(() => true);
-    res.send(ok ? "ok" : "mpris unavailable");
+    actionGeneration++;
+    pendingPlayingIntent = null;
+    try {
+        await ensureEncoderRunning();
+        pushStateIfChanged();
+        let ok = await mprisCommand("Previous");
+        if (!ok) ok = await controls.previous.click({ noWaitAfter: true }).then(() => true);
+        res.send(ok ? "ok" : "mpris unavailable");
+        selfHealTowards(true);
+    } catch (e) {
+        console.error("/previous failed:", e.message);
+        res.status(500).send("error");
+    }
 });
 
 
@@ -393,11 +1055,26 @@ app.get("/repeat", async (req, res) => {
 // than just leaving it open once opened
 async function getContextAndQueue() {
 
-    let list = await page.$('ul[aria-label="À suivre"]');
+    // the panel being open is what matters, not specifically the
+    // algorithmic "À suivre" list - confirmed live: queuing a whole
+    // album via the Web Player's own "Ajouter à la file d'attente"
+    // (instead of one track at a time through this app) leaves the
+    // panel showing ONLY the manual list, no algorithmic continuation
+    // at all. The old code waited on the algo list alone, so that real,
+    // reachable state made every /context-and-queue call hang for a
+    // full 8s and then 500 - checking/waiting for either list fixes
+    // that without weakening anything for the normal case.
+    const panelAlreadyOpen = await page.evaluate(() =>
+        !!document.querySelector('ul[aria-label="À suivre"]') ||
+        !!document.querySelector('ul[aria-label="À suivre dans la file d\'attente"]')
+    );
 
-    if (!list) {
+    if (!panelAlreadyOpen) {
         await page.getByTestId("control-button-queue").click();
-        await page.waitForSelector('ul[aria-label="À suivre"]', { timeout: 8000 });
+        await Promise.race([
+            page.waitForSelector('ul[aria-label="À suivre"]', { timeout: 8000 }),
+            page.waitForSelector('ul[aria-label="À suivre dans la file d\'attente"]', { timeout: 8000 })
+        ]).catch(() => {});
     }
 
     const result = await page.evaluate(() => {
@@ -426,17 +1103,20 @@ async function getContextAndQueue() {
         }
 
         const list = document.querySelector('ul[aria-label="À suivre"]');
-        if (!list) return { context: "", queue: [], manualQueue: [] };
-
-        const headingText = list.previousElementSibling?.innerText || "";
-        const match = headingText.match(/:\s*(.+)/);
-        const context = match ? match[1].trim() : "";
 
         // manually-queued tracks ("Ajouter à la file d'attente") live in
         // their own separate list, distinct from this algorithmic
         // continuation - both are read together since both need the
-        // panel open anyway
+        // panel open anyway. Neither is guaranteed to exist on its own
+        // (see above), so this no longer bails out just because the
+        // algorithmic one specifically is missing.
         const manualList = document.querySelector('ul[aria-label="À suivre dans la file d\'attente"]');
+
+        if (!list && !manualList) return { context: "", queue: [], manualQueue: [] };
+
+        const headingText = list?.previousElementSibling?.innerText || "";
+        const match = headingText.match(/:\s*(.+)/);
+        const context = match ? match[1].trim() : "";
 
         return {
             context,
@@ -450,9 +1130,12 @@ async function getContextAndQueue() {
 
 }
 
-app.get("/state", async (req, res) => {
+// Shared by /state (kept for compatibility/debugging - the app itself
+// moved to the /state-stream WebSocket push below) and the push path
+// itself - both need the exact same scrape, not two copies of it.
+async function scrapeState() {
 
-    const state = await page.evaluate(() => {
+    return await page.evaluate(() => {
 
         const playButton =
             document.querySelector(
@@ -471,56 +1154,68 @@ app.get("/state", async (req, res) => {
             )?.innerText || "";
 
 
-const position =
-    document.querySelector(
-        '[data-testid="playback-position"]'
-    )?.innerText || "";
+        const position =
+            document.querySelector(
+                '[data-testid="playback-position"]'
+            )?.innerText || "";
 
-const duration =
-    document.querySelector(
-        '[data-testid="playback-duration"]'
-    )?.innerText || "";
+        const duration =
+            document.querySelector(
+                '[data-testid="playback-duration"]'
+            )?.innerText || "";
 
-const cover =
-    (document.querySelector(
-        '[data-testid="cover-art-button"] img'
-    )?.src || "").replace("ab67616d00004851", "ab67616d0000b273");
+        const cover =
+            (document.querySelector(
+                '[data-testid="cover-art-button"] img'
+            )?.src || "").replace("ab67616d00004851", "ab67616d0000b273");
 
-const shuffleButton =
-    document.querySelector(
-        '[data-testid="general-controls"] button'
-    );
+        const shuffleButton =
+            document.querySelector(
+                '[data-testid="general-controls"] button'
+            );
 
-// no aria-checked/aria-pressed exposed on this button (unlike repeat
-// below), so state has to be read from Spotify's own "active" color
-// class instead of the language-dependent aria-label text
-const shuffle =
-    shuffleButton?.classList.contains("encore-internal-color-text-bright-accent") || false;
+        // no aria-checked/aria-pressed exposed on this button (unlike repeat
+        // below), so state has to be read from Spotify's own "active" color
+        // class instead of the language-dependent aria-label text
+        const shuffle =
+            shuffleButton?.classList.contains("encore-internal-color-text-bright-accent") || false;
 
-const repeatChecked =
-    document.querySelector(
-        '[data-testid="control-button-repeat"]'
-    )?.getAttribute("aria-checked");
+        const repeatChecked =
+            document.querySelector(
+                '[data-testid="control-button-repeat"]'
+            )?.getAttribute("aria-checked");
 
-let repeat = "off";
-if (repeatChecked === "true") repeat = "context";
-else if (repeatChecked === "mixed") repeat = "track";
+        let repeat = "off";
+        if (repeatChecked === "true") repeat = "context";
+        else if (repeatChecked === "mixed") repeat = "track";
 
-return {
-    title,
-    artist,
-    playing:
-        playButton?.getAttribute("aria-label") === "Pause",
-    position,
-    duration,
-    cover,
-    shuffle,
-    repeat
-};
+        return {
+            title,
+            artist,
+            playing:
+                playButton?.getAttribute("aria-label") === "Pause",
+            position,
+            duration,
+            cover,
+            shuffle,
+            repeat
+        };
 
-});
+    });
 
-    res.json(state);
+}
+
+// reflect the not-yet-real-on-Spotify pause intent immediately (see
+// pendingPlayingIntent) rather than Spotify's own current aria-label -
+// otherwise a client sees "still playing" for the whole delay
+// pauseSpotifyAndEncoder waits out, and never mutes/updates the icon
+function applyPendingIntent(state) {
+    if (pendingPlayingIntent !== null) state.playing = pendingPlayingIntent;
+    return state;
+}
+
+app.get("/state", async (req, res) => {
+    res.json(applyPendingIntent(await scrapeState()));
 
 });
 
@@ -704,6 +1399,31 @@ app.get("/whats-new", async (req, res) => {
 
 async function tryClickPlayableElement(id) {
 
+    // a shared link (see /resolve-link) sits the page directly on this
+    // exact entity's own page rather than a row referencing it from
+    // some list - there's nothing to find in that case, its own
+    // action-bar "Lecture" button is the equivalent action. That button
+    // is a combined play/pause toggle, and Spotify's own delayed
+    // autoplay can land at just the wrong moment (confirmed live: a
+    // click landed right as autoplay had already started the track,
+    // toggling it straight back off) - verify once more afterward and
+    // correct with the ordinary bottom-bar button, same self-heal shape
+    // as selfHealTowards elsewhere.
+    if (page.url().includes(`/${id}`)) {
+
+        const clicked = await page.locator('[data-testid="action-bar-row"] [data-testid="play-button"]')
+            .click({ timeout: 5000 }).then(() => true).catch(() => false);
+
+        if (!clicked) return false;
+
+        await new Promise(r => setTimeout(r, 1000));
+        const isPlaying = (await controls.playPause.getAttribute("aria-label")) === "Pause";
+        if (!isPlaying) await controls.playPause.click({ noWaitAfter: true });
+
+        return true;
+
+    }
+
     return await page.evaluate((id) => {
 
         const link = document.querySelector(`a[href*="/${id}"]`)
@@ -787,6 +1507,15 @@ async function tryAddToQueue(id) {
 
     await page.waitForSelector('[role="menu"]', { timeout: 3000 }).catch(() => {});
 
+    // captured BEFORE the click, not after - the queue panel's own list
+    // only exists in the DOM at all once it's been opened at least once
+    // this session, and if it's currently closed there's nothing to
+    // compare against below anyway (handled by the flat fallback delay)
+    const manualQueueCountBefore = await page.evaluate(() =>
+        document.querySelector('ul[aria-label="À suivre dans la file d\'attente"]')
+            ?.querySelectorAll('li[role="row"]').length ?? null
+    );
+
     const clicked = await page.evaluate(() => {
 
         const menu = document.querySelector('[role="menu"]');
@@ -805,9 +1534,36 @@ async function tryAddToQueue(id) {
 
     // don't leave a stray open menu behind if the item wasn't found
     // (e.g. this row turned out not to be a track)
-    if (!clicked) await page.keyboard.press("Escape").catch(() => {});
+    if (!clicked) {
+        await page.keyboard.press("Escape").catch(() => {});
+        return false;
+    }
 
-    return clicked;
+    // Spotify's own click handler updates the queue panel asynchronously
+    // - confirmed live: responding "ok" right after the click (as this
+    // used to) let the client's own immediate refresh (QueueRefreshTrigger,
+    // see NowPlayingViewModel) race ahead of it and read the queue panel
+    // BEFORE the new row had actually rendered, showing every add as
+    // "missing" until the next unrelated refresh (a track change)
+    // happened to catch it later. If the panel was already open, wait
+    // for its own row count to actually increase; if it wasn't open at
+    // all, there's no DOM signal to watch, so just give Spotify's UI a
+    // moment before answering.
+    if (manualQueueCountBefore === null) {
+        await page.waitForTimeout(500);
+    } else {
+        const deadline = Date.now() + 3000;
+        while (Date.now() < deadline) {
+            const count = await page.evaluate(() =>
+                document.querySelector('ul[aria-label="À suivre dans la file d\'attente"]')
+                    ?.querySelectorAll('li[role="row"]').length ?? 0
+            );
+            if (count > manualQueueCountBefore) break;
+            await page.waitForTimeout(150);
+        }
+    }
+
+    return true;
 
 }
 
@@ -978,6 +1734,13 @@ async function scrollToFindAndClick(clickFn, direction) {
 
 }
 
+// Same class of bug /next and /previous had (see their own comment):
+// clicking a result's play button while paused makes Spotify start
+// playing with no encoder running to capture it - silent audio on the
+// phone until a manual /play - and leaves /state stuck reporting
+// paused (pendingPlayingIntent never reset). ensureEncoderRunning()
+// before the click, actionGeneration/pendingPlayingIntent reset the
+// same way, fixes both.
 app.get("/play-result", async (req, res) => {
 
     const id = req.query.id;
@@ -988,6 +1751,10 @@ app.get("/play-result", async (req, res) => {
     }
 
     try {
+
+        actionGeneration++;
+        pendingPlayingIntent = null;
+        await ensureEncoderRunning();
 
         let clicked = await tryClickPlayableElement(id);
 
@@ -1000,6 +1767,7 @@ app.get("/play-result", async (req, res) => {
         }
 
         res.send("ok");
+        selfHealTowards(true);
 
     } catch (e) {
         console.error(e);
@@ -1034,6 +1802,111 @@ app.get("/queue-add", async (req, res) => {
     } catch (e) {
         console.error(e);
         res.status(500).send("queue-add error");
+    }
+
+});
+
+// Spotify links shared to the phone land here (see share_target in
+// manifest.json) with the raw shared text - pull out whatever looks
+// like a Spotify link/URI and resolve it into the same shape /search
+// returns, so the client can show it in the search overlay as if it
+// were a single search result. Playing/browsing only happens once the
+// user actually taps it, through the exact same handlers a real search
+// result already uses (see createResultItem in player.js) - this route
+// itself never plays anything, EXCEPT that Spotify's own web player
+// autoplays track pages on its own a second or so after navigating
+// there, independent of anything this does - confirmed live, and
+// confirmed live too that trying to fight it (catching the moment it
+// starts and clicking pause) doesn't reliably stick, Spotify just
+// re-asserts playing again. Album/playlist/artist pages never do this.
+// So for tracks specifically this makes sure the encoder is at least
+// running (see below) instead of pretending there's a silent "resolved
+// but not yet playing" state to show - the client skips the overlay
+// entirely for that type (see openSharedLink in player.js), since
+// tapping a card for something already playing would hit the
+// action-bar's toggle and pause it right back off.
+const SPOTIFY_LINK_PATTERN =
+    /open\.spotify\.com\/(?:intl-\w+\/)?(track|album|playlist|artist|episode|show)\/([a-zA-Z0-9]+)|spotify:(track|album|playlist|artist|episode|show):([a-zA-Z0-9]+)/;
+
+app.get("/resolve-link", async (req, res) => {
+
+    const raw = req.query.url || req.query.text || "";
+    const match = raw.match(SPOTIFY_LINK_PATTERN);
+
+    if (!match) {
+        return res.status(400).send("no spotify link found");
+    }
+
+    const type = match[1] || match[3];
+    const id = match[2] || match[4];
+
+    try {
+
+        // Spotify autoplaying the track is real playback, not just a
+        // page load - confirmed live: if the encoder wasn't already
+        // running (e.g. it was correctly left stopped at boot because
+        // Spotify was paused then), that autoplay produces real sound
+        // on the PC with nothing at all reaching the phone, since
+        // nothing else in this path starts or resumes it. Deliberately
+        // NOT resumeHlsEncoder() - that now also sends an explicit MPRIS
+        // "Play" (see its own comment), which would be sent against the
+        // OLD page, before this navigation even happens, racing Spotify's
+        // own autoplay. This only needs the encoder to exist by the time
+        // real audio shows up, same as the original boot path - no
+        // explicit play command required, Spotify does that on its own.
+        if (type === "track" && !currentInstance) {
+            startEncoderOnceAudioIsReal();
+        }
+
+        await page.goto(`https://open.spotify.com/${type}/${id}`, { waitUntil: "domcontentloaded" });
+
+        // "main h1" covers track/album/playlist reliably (confirmed
+        // live) - artist pages don't render the name as an h1 at all, so
+        // there's nothing there to wait for; racing a wait on document.title
+        // instead (confirmed live too: it can resolve on the *previous*
+        // page's still-lingering title, before the new page has actually
+        // replaced it - a real title update and stale leftover text look
+        // identical to a bare inequality check) - branching on the type
+        // already parsed out of the link sidesteps needing to guess
+        // which condition is real
+        if (type === "artist") {
+            await page.waitForTimeout(2500);
+        } else {
+            await page.waitForSelector("main h1", { timeout: 8000 }).catch(() => {});
+        }
+
+        const result = await page.evaluate((type) => {
+
+            const main = document.querySelector('main');
+            const h1 = main?.querySelector('h1');
+
+            const title = h1?.innerText
+                || document.title.replace(/\s*[|•]\s*Spotify.*$/, "").trim();
+
+            // artist pages don't have the title/subtitle pair sitting
+            // together the way the other types do - just label it like
+            // /search already does for artist results elsewhere
+            let subtitle = "Artiste";
+            if (type !== "artist") {
+                let container = h1;
+                for (let i = 0; i < 3 && container; i++) container = container.parentElement;
+                const spans = container ? [...container.querySelectorAll("span")].map(s => s.innerText).filter(Boolean) : [];
+                // [0] type label, [1]/[2] the title itself (duplicated),
+                // [3] is the artist/creator name in every type tested
+                subtitle = spans[3] || "";
+            }
+
+            const cover = main?.querySelector("img")?.src || "";
+
+            return { title, subtitle, cover };
+
+        }, type);
+
+        res.json({ id, type, ...result });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).send("resolve-link error");
     }
 
 });
@@ -1594,13 +2467,22 @@ app.get("/home", async (req, res) => {
         await page.waitForSelector('[data-testid="component-shelf"]', { timeout: 8000 });
         await waitForStableCount(page.locator('[data-testid="component-shelf"]'));
 
+        // one shelf (Spotify's personalized "Pour les fans de..."
+        // recommendations row) has no [data-testid="rich-title-row-
+        // shelf-header"] at all, confirmed live - it used to be silently
+        // dropped here (filter(Boolean) on an empty string), which also
+        // meant /home-section could never reach it since that endpoint
+        // re-derives the same index space from the same filter. Giving
+        // it a fallback label instead keeps every shelf's index aligned
+        // 1:1 between this endpoint and /home-section without needing
+        // any special-casing on either side.
         const headings = await page.evaluate(() => {
 
             const shelves = [...document.querySelectorAll('[data-testid="component-shelf"]')];
 
-            return shelves
-                .map(shelf => shelf.querySelector('[data-testid="rich-title-row-shelf-header"] h2')?.innerText || "")
-                .filter(Boolean);
+            return shelves.map(shelf =>
+                shelf.querySelector('[data-testid="rich-title-row-shelf-header"] h2')?.innerText || "Suggestions Spotify"
+            );
 
         });
 
@@ -1628,38 +2510,136 @@ app.get("/home-section", async (req, res) => {
         await page.waitForSelector('[data-testid="component-shelf"]', { timeout: 8000 });
         await waitForStableCount(page.locator('[data-testid="component-shelf"]'));
 
+        // the "Pour les fans de..." recommendations shelf (last one,
+        // see /home's comment) renders its cards' text lazily as they
+        // scroll into view - confirmed live: without this, every card's
+        // title/subtitle came back empty (data-uri and img src, being
+        // plain attributes rather than laid-out text, still worked fine,
+        // which is what made this one confusing to track down). Doing
+        // this for every index, not just that one shelf, is harmless -
+        // an already-visible shelf just gets a no-op scroll.
+        await page.evaluate((index) => {
+            const shelves = [...document.querySelectorAll('[data-testid="component-shelf"]')];
+            shelves[index]?.scrollIntoView({ block: "center" });
+        }, index);
+        await page.waitForTimeout(400);
+
         const items = await page.evaluate((index) => {
 
             const shelves = [...document.querySelectorAll('[data-testid="component-shelf"]')];
-
-            const shelvesWithHeading = shelves.filter(shelf =>
-                shelf.querySelector('[data-testid="rich-title-row-shelf-header"] h2')?.innerText
-            );
-
-            const shelf = shelvesWithHeading[index];
+            const shelf = shelves[index];
 
             if (!shelf) return [];
 
             const cards = [...shelf.querySelectorAll('[data-encore-id="card"]')];
 
-            return cards.map(card => {
+            if (cards.length > 0) {
+                return cards.map(card => {
 
-                const labelledBy = card.getAttribute('aria-labelledby') || "";
-                const uriMatch = labelledBy.match(/spotify:(album|track|artist|playlist|show|episode):([a-zA-Z0-9]+)/);
+                    const labelledBy = card.getAttribute('aria-labelledby') || "";
+                    const uriMatch = labelledBy.match(/spotify:(album|track|artist|playlist|show|episode):([a-zA-Z0-9]+)/);
 
-                if (!uriMatch) return null;
+                    if (!uriMatch) return null;
 
-                const titleEl = card.querySelector('[id^="card-title-"]');
-                const subtitleEl = card.querySelector('[id^="card-subtitle-"]');
-                const cover = card.querySelector('[data-testid="card-image"]')?.src
-                    || card.querySelector('img')?.src || "";
+                    const titleEl = card.querySelector('[id^="card-title-"]');
+                    const subtitleEl = card.querySelector('[id^="card-subtitle-"]');
+                    const cover = card.querySelector('[data-testid="card-image"]')?.src
+                        || card.querySelector('img')?.src || "";
+
+                    return {
+                        id: uriMatch[2],
+                        type: uriMatch[1],
+                        title: titleEl?.innerText || "",
+                        subtitle: subtitleEl?.innerText || "",
+                        cover
+                    };
+
+                }).filter(Boolean);
+            }
+
+            // fallback for the "Pour les fans de..." recommendations
+            // shelf (see /home's own comment) - confirmed live: its
+            // cards have none of the above (no [data-encore-id="card"],
+            // no aria-labelledby spotify URI, no card-title-/
+            // card-subtitle- ids), but each one still carries a
+            // data-uri="spotify:type:id" on an inner element and a real
+            // <h2> title, wrapped together with a small type/owner
+            // header - dig those out directly instead of giving up.
+            const seen = new Set();
+
+            return [...shelf.querySelectorAll('[data-uri]')].map(el => {
+
+                const uriMatch = (el.getAttribute('data-uri') || "")
+                    .match(/spotify:(album|track|artist|playlist|show|episode):([a-zA-Z0-9]+)/);
+
+                if (!uriMatch || seen.has(uriMatch[2])) return null;
+
+                let card = el;
+                let header = null, titleEl = null;
+                for (let i = 0; i < 6 && card; i++) {
+                    header = card.querySelector('header');
+                    titleEl = card.querySelector('h2');
+                    if (header && titleEl) break;
+                    card = card.parentElement;
+                }
+
+                if (!card || !titleEl) return null;
+                seen.add(uriMatch[2]);
+
+                // header wraps the title too (that's how the walk above
+                // finds both at once) - strip it back out so subtitle
+                // isn't just the title repeated in front of "Playlist •
+                // Spotify"/"Album • <owner>" etc. innerText's usual
+                // implicit spacing between block-level children doesn't
+                // apply here - confirmed live, "Playlist" and "Spotify"
+                // sit in adjacent inline spans and innerText ran them
+                // together as "PlaylistSpotify" with nothing to split
+                // on - so walk the actual text nodes instead and join
+                // them explicitly.
+                const headerClone = header.cloneNode(true);
+                headerClone.querySelector('h2')?.remove();
+                const walker = document.createTreeWalker(headerClone, NodeFilter.SHOW_TEXT);
+                const parts = [];
+                let textNode;
+                while ((textNode = walker.nextNode())) {
+                    const t = textNode.textContent.trim();
+                    if (t) parts.push(t);
+                }
+                const subtitle = parts.join(" • ");
+
+                // the small contextual caption Spotify shows above each
+                // card here ("Pour les fans de X", "Conçu spécialement
+                // pour vous"...) lives in a SEPARATE <header>, a direct
+                // sibling of `card` one level up - not the same one
+                // `subtitle` came from (that one's nested inside `card`
+                // itself, wrapping the title/type/owner). Per-card, not
+                // shelf-wide, so it goes in `meta` alongside each item
+                // rather than in the shelf's own heading.
+                const contextHeader = card.parentElement?.querySelector(':scope > header');
+                const meta = (contextHeader && contextHeader !== header)
+                    ? contextHeader.innerText.trim() || null
+                    : null;
+
+                // `card` also contains a decorative carousel of OTHER
+                // unrelated covers (cycling background thumbnails, see
+                // data-testid="carousel-scroller" inside it) that sits
+                // BEFORE the real card image in document order -
+                // querying img anywhere in `card` grabbed one of those
+                // instead, confirmed live. `header` (the inner one,
+                // title/type/owner) is where the actual
+                // data-testid="card-image" for this specific item lives,
+                // same testid the standard-card branch above already
+                // keys off.
+                const cover = header.querySelector('[data-testid="card-image"]')?.src
+                    || header.querySelector('img')?.src || "";
 
                 return {
                     id: uriMatch[2],
                     type: uriMatch[1],
-                    title: titleEl?.innerText || "",
-                    subtitle: subtitleEl?.innerText || "",
-                    cover
+                    title: titleEl.innerText || "",
+                    subtitle,
+                    cover,
+                    meta
                 };
 
             }).filter(Boolean);
@@ -1888,6 +2868,12 @@ async function scrollLibraryToFraction(fraction) {
 }
 
 async function tryClickAnywhere(id) {
+
+    // same reasoning as tryClickPlayableElement's own fallback - a
+    // shared link (see /resolve-link) already sat the page on this
+    // exact entity's own page, so there's nothing to find or click,
+    // we're already there
+    if (page.url().includes(`/${id}`)) return true;
 
     return await page.evaluate((id) => {
 
@@ -2547,12 +3533,29 @@ app.get("/queue-play", async (req, res) => {
 
     const index = Number(req.query.index);
     const listType = req.query.list === "manual" ? "manual" : "queue";
+    // The client's index is a snapshot from its last /context-and-queue
+    // fetch - the real queue can shift between that fetch and the tap
+    // actually landing (a track auto-advancing pushes every remaining row
+    // down by one), so a bare positional click can land on the wrong,
+    // adjacent row. When given, these are what the client expected to
+    // find there - verified below before trusting the index, self-
+    // correcting by title/artist search instead of just clicking blind.
+    const expectedTitle = typeof req.query.title === "string" ? req.query.title : "";
+    const expectedSubtitle = typeof req.query.subtitle === "string" ? req.query.subtitle : "";
 
     if (isNaN(index) || index < 0) {
         return res.status(400).send("invalid index");
     }
 
     try {
+
+        // Same class of bug /next, /previous and /play-result had: while
+        // paused, clicking a queue row's play button makes Spotify start
+        // playing with no encoder running to capture it. See their own
+        // comments for the full failure mode - fixed here the same way.
+        actionGeneration++;
+        pendingPlayingIntent = null;
+        await ensureEncoderRunning();
 
         // no longer guaranteed to already be open now that the panel
         // isn't kept open by a separate polling call - reopen it here
@@ -2567,30 +3570,62 @@ app.get("/queue-play", async (req, res) => {
             ? 'ul[aria-label="À suivre dans la file d\'attente"]'
             : 'ul[aria-label="À suivre"]';
 
-        const clicked = await page.evaluate(({ selector, index }) => {
+        const clicked = await page.evaluate(({ selector, index, expectedTitle, expectedSubtitle }) => {
 
             const list = document.querySelector(selector);
             if (!list) return false;
 
             const rows = [...list.querySelectorAll('li[role="row"]')];
-            const row = rows[index];
 
-            if (!row) return false;
+            // Must match getContextAndQueue's own scrapeRows() exactly -
+            // expectedTitle/expectedSubtitle are what that function sent
+            // the client in the first place. A plain subtitleEl.innerText
+            // here (the whole container's raw text) doesn't equal what
+            // scrapeRows actually reports whenever the subtitle holds
+            // artist <a> links: scrapeRows joins just the links' own
+            // innerText with ", ", not the container's full text, which
+            // silently differs from it - confirmed live, breaking the
+            // exact-match check below and 404ing every queue-play tap.
+            function rowText(row) {
+                const titleEl = row.querySelector('[id^="listrow-title-"]');
+                const subtitleEl = row.querySelector('[id^="listrow-subtitle-"]');
+                const artistLinks = [...(subtitleEl?.querySelectorAll('a') || [])];
+                const subtitle = artistLinks.length
+                    ? artistLinks.map(a => a.innerText).join(", ")
+                    : (subtitleEl?.innerText || "");
+                return { title: titleEl?.innerText || "", subtitle };
+            }
 
-            const btn = row.querySelector('[data-testid="play-button"]');
+            let target = rows[index];
+
+            if (expectedTitle) {
+                const matchesExpected = (row) => {
+                    if (!row) return false;
+                    const { title, subtitle } = rowText(row);
+                    return title === expectedTitle && (!expectedSubtitle || subtitle === expectedSubtitle);
+                };
+                if (!matchesExpected(target)) {
+                    target = rows.find(matchesExpected);
+                }
+            }
+
+            if (!target) return false;
+
+            const btn = target.querySelector('[data-testid="play-button"]');
 
             if (!btn) return false;
 
             btn.click();
             return true;
 
-        }, { selector, index });
+        }, { selector, index, expectedTitle, expectedSubtitle });
 
         if (!clicked) {
             return res.status(404).send("not found");
         }
 
         res.send("ok");
+        selfHealTowards(true);
 
     } catch (e) {
         console.error(e);
@@ -2725,7 +3760,65 @@ app.get("/seek", async (req, res) => {
     res.send("ok");
 });
 
-app.listen(PORT, "0.0.0.0", async () => {
-    console.log(`Server listening on port ${PORT}`);
+// Pushes state to /state-stream clients the moment the page's own DOM
+// actually changes, instead of each client polling on its own schedule.
+// Observes document.body broadly (rather than pinning down every
+// individual testid container, which Spotify's own SPA restructures
+// often enough to be fragile) and debounces in-page before ever calling
+// back into Node - most mutations across the whole page touch none of
+// the fields /state reports at all (hover states, unrelated
+// animations); pushStateIfChanged's own before/after comparison is what
+// actually filters those out, this debounce just keeps the round trip
+// into Node from firing on every single one of them.
+async function setupStatePush() {
+
+    await page.exposeFunction("__notifyStateMightHaveChanged", () => {
+        pushStateIfChanged();
+    });
+
+    await page.evaluate(() => {
+        let debounceTimer = null;
+        const observer = new MutationObserver(() => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                window.__notifyStateMightHaveChanged();
+            }, 200);
+        });
+        observer.observe(document.body, {
+            subtree: true,
+            childList: true,
+            characterData: true,
+            attributes: true
+        });
+    });
+
+}
+
+const httpServer = app.listen(PORT, "0.0.0.0", async () => {
+    console.log(`Server listening on port ${PORT} (HTTP)`);
+    clearStaleHlsDir();
     await connectSpotify();
+    await setupStatePush();
+    // matches /pause and /play's own rule: the encoder should only run
+    // while Spotify is actually playing - a server restart while
+    // already paused shouldn't leave it running until the next tap
+    const alreadyPlaying = (await controls.playPause.getAttribute("aria-label")) === "Pause";
+    if (alreadyPlaying) startEncoderOnceAudioIsReal();
+});
+
+// Clients connect here instead of polling /state - sent the current
+// state right away on connect, then pushed to again only when
+// pushStateIfChanged (the DOM observer above, or an optimistic
+// pendingPlayingIntent update from /play, /pause, /next, /previous)
+// actually finds something changed.
+const wss = new WebSocketServer({ server: httpServer, path: "/state-stream" });
+
+wss.on("connection", async (ws) => {
+    wsClients.add(ws);
+    try {
+        ws.send(JSON.stringify(applyPendingIntent(await scrapeState())));
+    } catch (e) {
+        console.error(e);
+    }
+    ws.on("close", () => wsClients.delete(ws));
 });

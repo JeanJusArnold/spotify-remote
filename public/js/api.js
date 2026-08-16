@@ -130,3 +130,9 @@ export async function getCurrentAlbum(signal) {
 export async function seek(percent) {
     return fetch("/seek?percent=" + percent);
 }
+
+export async function resolveLink(text) {
+    const res = await fetch("/resolve-link?text=" + encodeURIComponent(text));
+    if (!res.ok) throw new Error("resolve-link failed");
+    return res.json();
+}
