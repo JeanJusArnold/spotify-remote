@@ -128,6 +128,85 @@ async function waitForAudioSignal() {
     }
 }
 
+// ffmpeg only ever writes ONE #EXT-X-MAP per manifest, at the top,
+// applying it to every segment currently listed - correct within a
+// single generation, but wrong for the whole crossover window after a
+// resume, where append_list (see spawnEncoderInstance) deliberately
+// keeps the outgoing generation's still-unevicted segments (genuinely
+// encoded against a DIFFERENT init-gN.mp4) alongside the new ones.
+// ffmpeg does correctly emit its own #EXT-X-DISCONTINUITY at that
+// boundary, just not a second #EXT-X-MAP to go with it.
+//
+// A pure text transform, not a disk rewrite: an earlier version of this
+// fix (2026-08-16) patched the file on disk in place, from the same
+// fs.watch callback that tracks segment boundaries - confirmed live
+// that this made pausing unreliable and live-offset drift run away,
+// because it wrote to the exact filename ("stream.m3u8") that
+// waitForNextManifestUpdate's own fs.watch listens for, racing its
+// event-driven pause-margin timer against a second, unrelated writer to
+// the same file. Applying the same correction at request time instead -
+// nothing here ever touches disk - means the manifest file on disk stays
+// exactly what ffmpeg itself wrote, once per real segment boundary, so
+// the pause timer keeps seeing exactly the events it expects.
+function patchManifestGenerationMaps(text) {
+
+    const lines = text.split("\n").filter((l) => l.length > 0);
+
+    const headerLines = [];
+    const entries = []; // { extinf, filename, generation }
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        // stripped unconditionally and rebuilt below - makes this
+        // idempotent regardless of what ffmpeg itself already wrote
+        if (line.startsWith("#EXT-X-MAP:") || line.startsWith("#EXT-X-DISCONTINUITY")) continue;
+        if (line.startsWith("#EXTINF:")) {
+            const filename = lines[i + 1];
+            const m = filename && filename.match(/^seg-g(\d+)-\d+\.m4s$/);
+            if (m) {
+                entries.push({ extinf: line, filename, generation: Number(m[1]) });
+                i++; // filename line already consumed above
+                continue;
+            }
+        }
+        if (entries.length === 0) headerLines.push(line);
+    }
+
+    if (entries.length === 0) return text;
+    if (new Set(entries.map((e) => e.generation)).size <= 1) return text; // ffmpeg's own single map is already correct
+
+    const out = [...headerLines];
+    let lastGeneration = null;
+    for (const entry of entries) {
+        if (entry.generation !== lastGeneration) {
+            if (lastGeneration !== null) out.push("#EXT-X-DISCONTINUITY");
+            out.push(`#EXT-X-MAP:URI="${initFilenameFor(entry.generation)}"`);
+            lastGeneration = entry.generation;
+        }
+        out.push(entry.extinf, entry.filename);
+    }
+    out.push("");
+
+    return out.join("\n");
+
+}
+
+// Intercepts only the manifest itself - segment/init files (the vast
+// majority of requests) fall through to express.static below unchanged.
+// See patchManifestGenerationMaps for why this is a read-time transform
+// rather than a disk rewrite.
+app.get("/hls/stream.m3u8", (req, res) => {
+    let text;
+    try {
+        text = fs.readFileSync(path.join(HLS_DIR, "stream.m3u8"), "utf8");
+    } catch {
+        res.status(404).end();
+        return;
+    }
+    res.set("Cache-Control", "no-store");
+    res.type(".m3u8").send(patchManifestGenerationMaps(text));
+});
+
 app.use("/hls", express.static(HLS_DIR));
 
 // HLS only ever delivers whole, completed segments - the client can't
@@ -264,7 +343,8 @@ function spawnEncoderInstance(sinkName) {
         // live this made the post-resume gap much WORSE, not better
         // (the live client needs real window depth to establish its
         // live edge at all). Kept append_list for the depth; the map
-        // mismatch itself is still unresolved as of this revert.
+        // mismatch itself is fixed separately, at request time, by
+        // patchManifestGenerationMaps.
         "-hls_flags", "append_list+delete_segments+omit_endlist",
         // fMP4/CMAF segments, not classic .ts - AAC-in-TS would also be
         // fine, but fMP4 is already known-working and there's no reason
@@ -527,10 +607,10 @@ let actionGeneration = 0;
 // a long pause), which throws away whatever buffered tail it had and
 // re-fetches the manifest fresh instead. The "no precise cross-device
 // timing needed" part above no longer describes the client's real
-// behavior - a fresh fetch can land mid-crossover-window on a segment
-// whose real init segment doesn't match what the manifest's single
-// #EXT-X-MAP claims at that instant (see spawnEncoderInstance's
-// append_list comment) - still unresolved.
+// behavior - a fresh fetch can land mid-crossover-window, but the
+// #EXT-X-MAP mismatch that used to imply is now fixed at request time
+// by patchManifestGenerationMaps (see spawnEncoderInstance's
+// append_list comment for the full history).
 //
 // Made adaptive 2026-08-15: real Spotify audio keeps playing for this
 // entire wait, while the phone's own audible output already stopped

@@ -74,7 +74,7 @@ class NowPlayingViewModel @Inject constructor(
 
     private val shieldController = ShieldController(viewModelScope)
 
-    private val POSITION_DISPLAY_ADVANCE_MS = 1500L
+    private val POSITION_DISPLAY_ADVANCE_MS = 1000L
 
     // How long the "BUFFER" overlay stays up after next/previous/playing
     // a specific track - matches HLS_SEGMENT_SECONDS/PlaybackService's
@@ -91,6 +91,17 @@ class NowPlayingViewModel @Inject constructor(
 
     private val _audioBuffering = MutableStateFlow(false)
     private var audioBufferingClearJob: Job? = null
+
+    // pauseSpotifyAndEncoder in server.js keeps the real Spotify (PC)
+    // position advancing for up to pauseLandsInMs after a pause tap,
+    // purely to build encoder buffer for the next resume - the position
+    // keeps extrapolating forward through that window too, instead of
+    // freezing the instant this device's own local audio stops, so the
+    // bar matches what's really still happening on the PC. Set from the
+    // /pause response below; self-expiring (no explicit clear needed) -
+    // once elapsedRealtime() passes it, uiState's combine just stops
+    // treating it as still-advancing on its own.
+    private var pauseDeadlineElapsedMs: Long? = null
 
     init {
         viewModelScope.launch {
@@ -147,9 +158,12 @@ class NowPlayingViewModel @Inject constructor(
         } else {
             val durationSeconds = parseMinutesSeconds(state.duration)
             val basePositionSeconds = parseMinutesSeconds(state.position)
-            // Only extrapolate forward while actually playing - a
-            // paused track's position is exactly what the last real
-            // push said and stays there until something changes again.
+            // Extrapolate forward while actually playing, AND while a
+            // deferred pause is still pending (real Spotify position on
+            // the PC keeps advancing until pauseDeadlineElapsedMs - see
+            // its own comment) - a genuinely paused track's position is
+            // exactly what the last real push said and stays there until
+            // something changes again.
             //
             // POSITION_DISPLAY_ADVANCE_MS nudges the extrapolation
             // forward a bit to cancel out the real pipeline latency
@@ -163,8 +177,27 @@ class NowPlayingViewModel @Inject constructor(
             // extrapolation involved, so no latency to cancel out) -
             // adding it there would just make a paused position wrong by
             // a constant 0.5s instead of matching.
-            val elapsedSeconds = if (state.playing) {
-                ((SystemClock.elapsedRealtime() - receivedAtMs + POSITION_DISPLAY_ADVANCE_MS) / 1000L).toInt()
+            //
+            // Once past the deadline, freeze at the deadline's OWN
+            // elapsed value, not at 0 - confirmed live that falling back
+            // to 0 (i.e. the raw basePositionSeconds from the original
+            // pause-tap push) made the bar visibly jump backward the
+            // instant the deferred pause landed, then jump forward again
+            // on resume once a fresh push finally corrected it. No real
+            // corroborating push arrives at the exact moment a deferred
+            // pause actually lands (playing was already reported false
+            // at tap time, so nothing in the dedup fields changes then -
+            // see pushStateIfChanged in server.js), so this device is on
+            // its own for that gap.
+            val nowMs = SystemClock.elapsedRealtime()
+            val deadline = pauseDeadlineElapsedMs
+            val elapsedMs = when {
+                state.playing -> nowMs - receivedAtMs
+                deadline != null -> (minOf(nowMs, deadline) - receivedAtMs).coerceAtLeast(0)
+                else -> null
+            }
+            val elapsedSeconds = if (elapsedMs != null) {
+                ((elapsedMs + POSITION_DISPLAY_ADVANCE_MS) / 1000L).toInt()
             } else {
                 0
             }
@@ -312,6 +345,7 @@ class NowPlayingViewModel @Inject constructor(
                 localPlaybackIntentTrigger.requestPlaying(false)
                 val liveOffsetMs = playbackStateRepository.currentLiveOffsetMs.value
                 val response = apiService.pause(liveOffsetMs)
+                pauseDeadlineElapsedMs = SystemClock.elapsedRealtime() + response.pauseLandsInMs
                 shieldController.armBracketed(response.pauseLandsInMs)
             } else {
                 val response = apiService.play()
