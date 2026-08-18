@@ -1,6 +1,6 @@
 # Spotify Remote
 
-A phone-facing web remote for controlling Spotify running in a desktop browser: play/pause, skip, search, browse your library, artists, albums and playlists, all from a page you open on your phone. It comes with a recommended companion setup for a dedicated, resource-conscious desktop session — including streaming that session's audio back to your phone too.
+A remote for controlling Spotify running in a desktop browser, from your phone: play/pause, skip, search, browse your library, artists, albums and playlists — plus streaming that desktop session's actual audio back to your phone, so you don't need to be near any speakers. Two clients are included: a native Android app (recommended) and a small web page, both talking to the same server. It comes with a recommended companion setup for a dedicated, resource-conscious desktop session too.
 
 ## Disclaimer
 
@@ -17,21 +17,22 @@ Use at your own risk. There is no warranty (see [LICENSE](./LICENSE)), and Spoti
 <img src="screenshots/home.png" width="200" alt="Home overlay with recommended sections">
 </p>
 
+(from the web client — the native Android app follows the same screens with a native UI)
+
 ## How it works
 
 - `server.js` connects to a running Chromium instance over CDP (`chromium.connectOverCDP`) and drives the already-open Spotify Web Player tab with Playwright: reading the DOM to scrape your library/playlists/artists/albums, and clicking through the UI to navigate and search.
 - Transport commands (play/pause/next/previous) go straight to Chromium's MPRIS interface over D-Bus instead of clicking DOM buttons, for reliability.
-- A small static frontend (`public/`) is served by the same Express app, meant to be opened from your phone.
-- Getting that audio onto your phone is handled by [AudioRelay](https://audiorelay.net) (available on Flathub) — a separate app, on both the desktop and your phone, not something the remote's own page does. `openbox-autostart.example` documents the desktop side.
-- Pausing Spotify from the remote alone still leaves AudioRelay's connection open and transmitting (measured: it drops from about 240KB to about 70KB over 10 seconds while paused — real, but far from zero), so it doesn't save nearly as much battery/data as actually closing the connection would (which AudioRelay's own free-tier stop/start button, or premium's notification play/pause, does). `audiorelay-mpris-bridge.sh` keeps Spotify in sync with that instead.
+- Getting that desktop session's audio onto your phone doesn't rely on a separate app: `server.js` captures a dedicated virtual audio sink itself, encodes it with `ffmpeg`, and serves it as a rolling HLS stream that both clients play natively (native hardware decode, and the phone's radio can sleep between segment fetches instead of holding a constant real-time connection open).
+- Two clients, same server: a native Android app (`android/`) and a small static web page (`public/`), served by the same Express app. The Android app is the primary, recommended way to use this day to day; the web page is a lighter no-install fallback that works from any phone browser.
 
-**No built-in authentication**: there's no password or login, so don't expose this to the public internet (e.g. don't port-forward it). Use a private network like Tailscale to reach it remotely instead.
+**No built-in authentication**: there's no password or login, so don't expose this to the public internet (e.g. don't port-forward it). Use a private network like Tailscale to reach it remotely instead — both clients talk to the server over plain HTTP, relying on Tailscale's own WireGuard encryption rather than a TLS layer on top.
 
-**Tuned for Chrome**: the phone-facing frontend was built and tested against Chrome for Android specifically — a handful of fixes (hiding scrollbars, blocking long-press text selection, working around Chrome's collapsing URL bar) rely on Chrome/WebKit-specific CSS and APIs. It should still load and work in other mobile browsers, just without these refinements.
+**Tuned for Chrome**: the web client specifically was built and tested against Chrome for Android — a handful of fixes (hiding scrollbars, blocking long-press text selection, working around Chrome's collapsing URL bar) rely on Chrome/WebKit-specific CSS and APIs. It should still load and work in other mobile browsers, just without these refinements. This doesn't apply to the native Android app, which has no such dependency.
 
 **Language dependency**: some of the scraping logic matches specific French UI labels Spotify renders (e.g. "Discographie", "À suivre", "Titres likés"), because the author's own Spotify account is set to French. If your Spotify Web Player is in a different language, some features will silently fail to find what they're looking for. Adapting the string matches in `server.js` to another language should be straightforward if you want to try.
 
-The frontend has its own separate language dependency: the search shortcuts ("p", "ar", "al" for Playlists/Artistes/Albums, see `librarySearchShortcuts` in `player.js`) are French abbreviations, unrelated to Spotify's own language. They won't make sense as-is in another language and would need picking new ones.
+The web client has its own separate language dependency: the search shortcuts ("p", "ar", "al" for Playlists/Artistes/Albums, see `librarySearchShortcuts` in `player.js`) are French abbreviations, unrelated to Spotify's own language. They won't make sense as-is in another language and would need picking new ones.
 
 These two are independent - changing one doesn't require changing the other - but if you're adapting this to another language, it's worth updating both to match for consistency.
 
@@ -43,6 +44,8 @@ This remote doesn't try to reproduce the full Spotify Web Player experience — 
 
 - Linux with D-Bus available (`gdbus` on your `PATH`) — used for MPRIS transport commands.
 - [Node.js](https://nodejs.org/) 18+.
+- `ffmpeg` on your `PATH` — used to encode the HLS audio relay.
+- A PipeWire or PulseAudio virtual sink named `spotify-remote-audio` for `ffmpeg` to capture from — see `openbox-autostart.example` for how to create one automatically on session start.
 - Chromium or Google Chrome, launched with remote debugging enabled and already logged into [open.spotify.com](https://open.spotify.com):
 
   ```
@@ -61,11 +64,9 @@ cd spotify-remote
 npm install
 ```
 
-`openbox-autostart.example` documents a full recommended session setup (virtual audio sink, launching Chromium, launching AudioRelay, and launching the server itself) as a copyable template for a dedicated session running just this project — copy it to `~/.config/openbox/autostart`. Install [AudioRelay](https://audiorelay.net) on your phone too, to actually hear what you're controlling: open Tailscale to find the machine's Tailscale IP, then enter it in AudioRelay on your phone to connect. Set AudioRelay's buffer amount to high in its settings — a low buffer leads to noticeably choppier playback over a remote (non-LAN) connection like Tailscale.
+`openbox-autostart.example` documents a full recommended session setup (virtual audio sink, launching Chromium, and launching the server itself) as a copyable template for a dedicated session running just this project — copy it to `~/.config/openbox/autostart`.
 
 Optionally, [EasyEffects](https://github.com/wwmm/easyeffects) can sit between Chromium and the virtual sink to level out loudness differences between tracks. `openbox-autostart.example` has the details (install command, and the Auto Gain settings this project settled on).
-
-`audiorelay-mpris-bridge.sh` (already wired into `openbox-autostart.example`) mirrors AudioRelay's own connect/disconnect events onto Spotify's play/pause, so that stopping/starting AudioRelay's transmission (via its stop/start button) pauses/resumes Spotify to match, instead of the two drifting out of sync. See the script itself for the reasoning.
 
 If you set this dedicated session up, make sure your display manager doesn't boot straight into it. It's also not something you want live right after a cold boot, especially since a minimal session like this is more likely to fail to start cleanly than your main one. On GDM with autologin enabled, this is a real pitfall: it silently re-logs into whichever session was last selected at the greeter (tracked per-user by AccountsService), so picking the dedicated session there even once makes it the autologin target from then on. Pin your main session instead by writing it directly to `/var/lib/AccountsService/users/<username>` (e.g. `Session=gnome`, `SessionType=wayland`) so autologin always lands there regardless of what was last picked manually.
 
@@ -77,7 +78,10 @@ node server.js
 
 (The autostart script above does both of these automatically on login)
 
-Open `http://<machine-ip>:3000` from your phone (over Tailscale or whatever private network reaches that machine).
+### Connecting a client
+
+- **Native Android app (recommended)**: build it from `android/` (`./gradlew assembleDebug`, or open the folder in Android Studio), install the APK on your phone, and enter the server's Tailscale hostname or IP in the app's Settings screen on first run (e.g. `http://<hostname>.<tailnet>.ts.net:3000` or `http://<tailscale-ip>:3000`). This is a one-time setting, editable later.
+- **Web page**: just open `http://<machine-ip>:3000` from your phone's browser (over Tailscale or whatever private network reaches that machine) — nothing to install.
 
 ## License
 

@@ -8,11 +8,11 @@ until pactl info >/dev/null 2>&1; do
     sleep 0.2
 done
 
-# A virtual sink, used below as AudioRelay's capture point - not just
-# a nice-to-have: AudioRelay was unreliable capturing straight from a
-# normal/default output in earlier testing, this dedicated null sink
-# is what made it work consistently. Nothing plays out of it on its
-# own otherwise
+# A virtual sink, used below as the built-in HLS audio relay's (see
+# server.js) ffmpeg capture point - not just a nice-to-have: capturing
+# straight from a normal/default output was unreliable in earlier
+# testing, this dedicated null sink is what made it work consistently.
+# Nothing plays out of it on its own otherwise
 # Create the virtual audio sink if it doesn't exist yet
 if ! pactl list short sinks | grep -q "spotify-remote-audio"; then
     pactl load-module module-null-sink \
@@ -46,52 +46,6 @@ pactl set-sink-volume spotify-remote-audio 100%
 # Settings persist automatically once set.
 #   flatpak install flathub com.github.wwmm.easyeffects
 flatpak run com.github.wwmm.easyeffects &
-
-# AudioRelay only depends on the virtual sink above, not on Chromium or
-# EasyEffects, so it's launched right alongside EasyEffects rather than
-# sequenced after anything. Getting that audio onto your phone is a
-# separate concern from the remote itself, but AudioRelay
-# (https://audiorelay.net, available on Flathub) is what this project
-# actually uses for it - picked after trying a few DIY alternatives (a
-# VLC/ffmpeg stream captured from a virtual sink, played through a
-# browser `<audio>` tag) that turned out heavier on CPU, or came with
-# real playback drawbacks (growing latency behind live audio, since a
-# plain `<audio>` element can't skip ahead to "now" the way
-# purpose-built low-latency protocols can) — AudioRelay just works
-# better for this. Install it first:
-#   flatpak install flathub net.audiorelay.AudioRelay
-flatpak run net.audiorelay.AudioRelay &
-
-# audiorelay-mpris-bridge.sh tracks AudioRelay's connection state and
-# triggers the remote's play/pause accordingly. Its actions are logged
-# to audiorelay-bridge.log, useful for spotting a runaway feedback loop
-# if one ever happens.
-"$HOME/spotify-remote/audiorelay-mpris-bridge.sh" \
-    >> "$HOME/spotify-remote/audiorelay-bridge.log" 2>&1 &
-
-# Watchdog: AudioRelay's capture backend (RtAudio) can silently relink
-# itself to the wrong PipeWire monitor during one of its own device
-# rescans (observed cause: a phone reconnecting at the same time as an
-# unrelated ALSA device re-enumeration, e.g. a GPU's HDMI audio output
-# being re-probed) - it doesn't report an error or fix it on its own when
-# this happens, so this loop checks the link every few seconds and
-# restores it if needed
-(
-    while true; do
-        for ch in FL FR; do
-            wrong=$(pw-link -l 2>/dev/null | awk -v p="RtAudio:input_$ch" '
-                $0==p {want=1; next}
-                want && /^  \|<-/ {sub(/^  \|<- /,""); print; exit}
-                want {exit}
-            ')
-            if [ -n "$wrong" ] && [ "$wrong" != "spotify-remote-audio:monitor_$ch" ]; then
-                pw-link -d "$wrong" "RtAudio:input_$ch" 2>/dev/null
-                pw-link "spotify-remote-audio:monitor_$ch" "RtAudio:input_$ch" 2>/dev/null
-            fi
-        done
-        sleep 5
-    done
-) &
 
 # Wait for EasyEffects' own PipeWire node to exist, so Chromium's audio
 # stream gets picked up by the effect chain from the very first sound
