@@ -5,7 +5,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.jbarnaud.spotifyremote.network.ApiService
 import com.jbarnaud.spotifyremote.network.dto.QueueItemDto
-import com.jbarnaud.spotifyremote.player.ShieldController
 import com.jbarnaud.spotifyremote.state.AudioBufferingTrigger
 import com.jbarnaud.spotifyremote.state.LocalPlaybackIntentTrigger
 import com.jbarnaud.spotifyremote.state.PlaybackStateRepository
@@ -72,9 +71,7 @@ class NowPlayingViewModel @Inject constructor(
     private val audioBufferingTrigger: AudioBufferingTrigger
 ) : ViewModel() {
 
-    private val shieldController = ShieldController(viewModelScope)
-
-    private val POSITION_DISPLAY_ADVANCE_MS = 1000L
+    private val POSITION_DISPLAY_ADVANCE_MS = 0L
 
     // How long the "BUFFER" overlay stays up after next/previous/playing
     // a specific track - matches HLS_SEGMENT_SECONDS/PlaybackService's
@@ -103,6 +100,26 @@ class NowPlayingViewModel @Inject constructor(
     // treating it as still-advancing on its own.
     private var pauseDeadlineElapsedMs: Long? = null
 
+    // Held slightly longer than the server's own mprisBlocked reports it
+    // needs, ONLY when dropping (never when raising - the button must
+    // disable itself immediately, same as before). Masks a real, known
+    // cosmetic glitch: state.playing can briefly show the wrong value
+    // for a few hundred ms right as mprisBlocked clears (a stale DOM
+    // scrape - see server.js's own comment on pauseSpotifyAndEncoder's
+    // pendingPlayingIntent reset), which flickers the revealed icon
+    // (shield → wrong icon → correct icon) if the shield drops the
+    // instant mprisBlocked does. Keeping the shield up a bit longer
+    // means state.playing has already settled by the time it's actually
+    // revealed. Purely a display delay - does NOT touch state.playing,
+    // HLS re-attach, or any server-side timing (see
+    // [[shield_mechanism_redesign]] for the regression cascade that
+    // attempting to fix the underlying signal timing directly caused,
+    // reverted the same day - this is a deliberately much lower-risk
+    // alternative).
+    private val SHIELD_DROP_DELAY_MS = 500L
+    private val _shieldHeld = MutableStateFlow(false)
+    private var shieldDropJob: Job? = null
+
     init {
         viewModelScope.launch {
             audioBufferingTrigger.events.collect {
@@ -113,6 +130,22 @@ class NowPlayingViewModel @Inject constructor(
                     _audioBuffering.value = false
                 }
             }
+        }
+        viewModelScope.launch {
+            playbackStateRepository.state
+                .map { it?.mprisBlocked ?: false }
+                .distinctUntilChanged()
+                .collect { blocked ->
+                    shieldDropJob?.cancel()
+                    if (blocked) {
+                        _shieldHeld.value = true
+                    } else {
+                        shieldDropJob = viewModelScope.launch {
+                            delay(SHIELD_DROP_DELAY_MS)
+                            _shieldHeld.value = false
+                        }
+                    }
+                }
         }
     }
 
@@ -148,11 +181,11 @@ class NowPlayingViewModel @Inject constructor(
 
     val uiState = combine(
         playbackStateRepository.state,
-        shieldController.isShielded,
         playbackStateRepository.stateReceivedAtMs,
         positionTicker,
-        _audioBuffering
-    ) { state, shielded, receivedAtMs, _, buffering ->
+        _audioBuffering,
+        _shieldHeld
+    ) { state, receivedAtMs, _, buffering, shielded ->
         if (state == null) {
             NowPlayingUiState(playPauseShielded = shielded, audioBuffering = buffering)
         } else {
@@ -344,12 +377,19 @@ class NowPlayingViewModel @Inject constructor(
                 // longer, not shorter - confirmed live.
                 localPlaybackIntentTrigger.requestPlaying(false)
                 val liveOffsetMs = playbackStateRepository.currentLiveOffsetMs.value
-                val response = apiService.pause(liveOffsetMs)
-                pauseDeadlineElapsedMs = SystemClock.elapsedRealtime() + response.pauseLandsInMs
-                shieldController.armBracketed(response.pauseLandsInMs)
+                // Catches the 409 mpris_blocked backstop (see
+                // StateResponse.mprisBlocked's own comment) - the button
+                // should already be disabled whenever this could happen,
+                // so a rejection here means the tap raced ahead of that,
+                // nothing meaningful to surface for it.
+                try {
+                    val response = apiService.pause(liveOffsetMs)
+                    pauseDeadlineElapsedMs = SystemClock.elapsedRealtime() + response.pauseLandsInMs
+                } catch (e: Exception) { /* mpris_blocked backstop - see comment above */ }
             } else {
-                val response = apiService.play()
-                shieldController.armWholeDuration(response.shieldMs)
+                try {
+                    apiService.play()
+                } catch (e: Exception) { /* mpris_blocked backstop - see comment above */ }
             }
         }
     }
@@ -368,6 +408,12 @@ class NowPlayingViewModel @Inject constructor(
     fun onRepeatClick() = fire { apiService.repeat() }
 
     fun onSeek(percent: Float) {
+        // Same real gap as next/previous/playing a specific track (see
+        // AudioBufferingTrigger's own comment) - a seek lands on Spotify
+        // almost immediately, but the audio actually heard trails the
+        // live edge by ~HLS_SEGMENT_SECONDS, so there's a real wait
+        // before what's audible matches the new position.
+        audioBufferingTrigger.notifyTrackChangeRequested()
         val durationSeconds = playbackStateRepository.state.value?.duration?.let(::parseMinutesSeconds)
         if (durationSeconds != null) {
             playbackStateRepository.applyLocalSeek((percent * durationSeconds).toInt())

@@ -133,10 +133,11 @@ fun NowPlayingScreen(
         // Covers cover/title/artist/position/seekbar/controls together
         // with a single "BUFFER" overlay after next/previous/playing a
         // specific track (AudioBufferingTrigger, collected in
-        // NowPlayingViewModel) - unrelated to ShieldController/
-        // playPauseShielded below, which only protects the play/pause
-        // button itself during a narrow server-timed danger window. This
-        // is about a different, always-present gap: the command lands on
+        // NowPlayingViewModel) - unrelated to playPauseShielded below,
+        // which only protects the play/pause button itself, mirroring
+        // the server's real mprisBlocked state during a narrow danger
+        // window. This is about a different, always-present gap: the
+        // command lands on
         // Spotify almost immediately, but the audio actually reaches this
         // phone's ear ~HLS_SEGMENT_SECONDS behind the live edge, so
         // there's always a real wait between "the app shows the new

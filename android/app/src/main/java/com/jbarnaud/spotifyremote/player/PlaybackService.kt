@@ -304,6 +304,23 @@ class PlaybackService : MediaSessionService() {
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession = mediaSession
 
+    // MediaSessionService's own default onTaskRemoved calls stopSelf()
+    // based on isPlaybackOngoing(), which checks whether Media3's OWN
+    // MediaNotificationManager started the foreground service - but this
+    // service manages startForeground()/its notification manually (see
+    // buildPlaceholderNotification/updateNotification below), never
+    // through that manager, so that check is always false regardless of
+    // real playback state. Confirmed live: swiping the app away always
+    // killed the session/notification immediately, even mid-playback -
+    // unlike other music apps, which keep the notification alive
+    // (manually dismissable by the user) as long as something's actually
+    // playing. Overridden to check the real player state instead.
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (!player.isPlaying) {
+            stopSelf()
+        }
+    }
+
     // Wraps the real ExoPlayer so the system's transport controls (lock
     // screen, notification, Bluetooth headset buttons, Android Auto)
     // drive the *server*, not the local HLS relay directly - this
@@ -477,8 +494,20 @@ class PlaybackService : MediaSessionService() {
             // content on its own, apparently because its live-manifest
             // refresh backs off the longer it sits idle/paused.
             currentBaseUrl?.let { attachMediaSource(it) }
+            player.playWhenReady = true
+        } else {
+            player.playWhenReady = false
+            // ExoPlayer's live-manifest refresh keeps polling on its own
+            // ~4s cadence even with playWhenReady=false - confirmed via
+            // server [traffic] logs showing manifest GETs continuing
+            // indefinitely after pause, at nearly the same radio cost as
+            // actual streaming (segment fetches are what stopped, not the
+            // poll itself). stop() tears down the HLS loader entirely,
+            // so nothing polls until the next real resume, which already
+            // rebuilds a fresh source from scratch via attachMediaSource
+            // above regardless of whether this ran.
+            player.stop()
         }
-        player.playWhenReady = playing
     }
 
     private fun onStateReceived(state: StateResponse) {

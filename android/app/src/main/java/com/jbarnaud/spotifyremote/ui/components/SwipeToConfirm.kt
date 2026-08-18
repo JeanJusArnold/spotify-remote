@@ -51,7 +51,7 @@ import kotlinx.coroutines.launch
 // instead: the row's own [label] ("Ajouter"/"Retirer") fades in as you
 // drag, and a checkmark replaces it once the drag has gone the full
 // SwipeCommitDistance and you let go.
-private val SwipeCommitDistance: Dp = 220.dp
+private val SwipeCommitDistance: Dp = 160.dp
 
 @Composable
 fun SwipeToConfirmRow(

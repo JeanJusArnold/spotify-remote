@@ -9,10 +9,11 @@ import javax.inject.Singleton
 // Fired by any action that changes what track is playing (next,
 // previous, playing a specific track from the queue/Browse/Search) -
 // NowPlayingViewModel is the sole subscriber, showing a "BUFFER" overlay
-// for a fixed window afterward. Unlike ShieldController (which protects
-// the play/pause button itself during a narrow, server-timed danger
-// window), this has nothing to do with button safety - it exists purely
-// to explain a real, separate lag: the command lands on Spotify quickly,
+// for a fixed window afterward. Unlike playPauseShielded (which mirrors
+// the server's real mprisBlocked state to protect the play/pause button
+// itself during a narrow danger window - see StateResponse.mprisBlocked),
+// this has nothing to do with button safety - it exists purely to
+// explain a real, separate lag: the command lands on Spotify quickly,
 // but the audio anyone actually hears is always ~HLS_SEGMENT_SECONDS
 // behind the live edge (see PlaybackService's own setTargetOffsetMs), so
 // there's always a real gap between "the app says the new track" and
