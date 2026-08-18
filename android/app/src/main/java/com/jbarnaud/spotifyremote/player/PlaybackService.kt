@@ -188,8 +188,35 @@ class PlaybackService : MediaSessionService() {
                 // nothing here ever seeks backward - bounds memory
                 // growth over a long session, analog of hlsListen.js's
                 // backBufferLength: 30
+                //
+                // minBufferMs/maxBufferMs also explicitly set, both well
+                // below DefaultLoadControl's own defaults (50_000/50_000) -
+                // confirmed live via dumpsys media_session that the
+                // defaults caused a continuous READY<->BUFFERING flap
+                // (every ~200ms, indefinitely, during otherwise completely
+                // normal playback - position/buffered position both kept
+                // advancing at real-time the whole time, so nothing was
+                // actually stalling). Root cause: our HLS window is only
+                // HLS_LIST_SIZE*HLS_SEGMENT_SECONDS (~32s, see server.js)
+                // and playback targets ~4s behind the live edge, so at
+                // most ~28s of buffer ahead of the playhead can ever
+                // exist - never enough to satisfy a 50s minBufferMs, so
+                // ExoPlayer kept re-declaring itself insufficiently
+                // buffered against a target this stream can't reach, even
+                // though what it already had was more than enough to
+                // play smoothly. Each flap fired onIsPlayingChanged,
+                // which re-posted the notification every time - the
+                // visible symptom was the system media notification's
+                // pause button flickering. minBufferMs/maxBufferMs below
+                // are sized to comfortably fit inside that ~28s ceiling.
                 DefaultLoadControl.Builder()
                     .setBackBuffer(30_000, true)
+                    .setBufferDurationsMs(
+                        /* minBufferMs = */ 8_000,
+                        /* maxBufferMs = */ 16_000,
+                        /* bufferForPlaybackMs = */ 2_000,
+                        /* bufferForPlaybackAfterRebufferMs = */ 4_000
+                    )
                     .build()
             )
             .build()
