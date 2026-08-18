@@ -1,6 +1,6 @@
 # Spotify Remote
 
-A native Android app for controlling Spotify running in a desktop browser, from your phone: play/pause, skip, search, browse your library, artists, albums and playlists — plus streaming that desktop session's actual audio back to your phone, so you don't need to be near any speakers. It comes with a recommended companion setup for a dedicated, resource-conscious desktop session too.
+A native Android app for controlling Spotify running in a desktop browser, from your phone: play/pause, skip, search, browse your library, artists, albums and playlists — plus streaming that desktop session's actual audio back to your phone. It comes with a recommended companion setup for a dedicated, resource-conscious desktop session too.
 
 ## Disclaimer
 
