@@ -182,12 +182,11 @@ spotify remote
 
 
 
-<!-- Temporary test: DIY HLS audio stream from the PC, as an alternative
-     to AudioRelay for phone battery reasons - not a finished feature,
-     mirrors the remote's own play/pause state, see hlsListen.js -->
+<!-- Continuous audio relay from the PC (see hlsListen.js) - mirrors the
+     remote's own play/pause state. No library needed: a plain <audio>
+     element handles a continuous stream natively. -->
 <audio id="hlsAudio" style="display:none;"></audio>
 
-<script src="/js/vendor/hls.min.js"></script>
 <script type="module" src="/js/hlsListen.js"></script>
 <script type="module" src="/js/ui.js"></script>
 

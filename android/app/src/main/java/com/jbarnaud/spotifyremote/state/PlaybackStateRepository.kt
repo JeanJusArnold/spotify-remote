@@ -52,18 +52,4 @@ class PlaybackStateRepository @Inject constructor() {
         _stateReceivedAtMs.value = SystemClock.elapsedRealtime()
     }
 
-    // Last known Player.getCurrentLiveOffset() from PlaybackService (the
-    // only place with a real ExoPlayer instance) - written whenever it
-    // changes there, read here by whichever screen calls /pause so the
-    // server's deferred-pause margin can adapt to it. PlaybackService's
-    // own MediaSession pause path reads player.currentLiveOffset
-    // directly instead of through here, since it already has the player
-    // at hand.
-    private val _currentLiveOffsetMs = MutableStateFlow(0L)
-    val currentLiveOffsetMs: StateFlow<Long> = _currentLiveOffsetMs.asStateFlow()
-
-    fun updateCurrentLiveOffsetMs(offsetMs: Long) {
-        _currentLiveOffsetMs.value = offsetMs
-    }
-
 }

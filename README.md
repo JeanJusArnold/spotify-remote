@@ -23,7 +23,7 @@ Use at your own risk. There is no warranty (see [LICENSE](./LICENSE)), and Spoti
 
 - `server.js` connects to a running Chromium instance over CDP (`chromium.connectOverCDP`) and drives the already-open Spotify Web Player tab with Playwright: reading the DOM to scrape your library/playlists/artists/albums, and clicking through the UI to navigate and search.
 - Transport commands (play/pause/next/previous) go straight to Chromium's MPRIS interface over D-Bus instead of clicking DOM buttons, for reliability.
-- Getting that desktop session's audio onto your phone doesn't rely on a separate app: `server.js` captures a dedicated virtual audio sink itself, encodes it with `ffmpeg`, and serves it as a rolling HLS stream the app plays natively (native hardware decode, and the phone's radio can sleep between segment fetches instead of holding a constant real-time connection open).
+- Getting that desktop session's audio onto your phone doesn't rely on a separate app: `server.js` captures a dedicated virtual audio sink itself, encodes it with `ffmpeg`, and rebroadcasts it live as a continuous AAC stream (Icecast/SHOUTcast-style — one connection per listener, no manifest) that the app plays natively with hardware decode.
 - The Android app (`android/`) is the client this project is actually built and maintained around. An earlier web page (`public/`), also served by the same Express app, is still in the repo and still technically works, but it's no longer actively developed - the native app fully replaced it.
 
 **No built-in authentication**: there's no password or login, so don't expose this to the public internet (e.g. don't port-forward it). Use a private network like Tailscale to reach it remotely instead — the app talks to the server over plain HTTP, relying on Tailscale's own WireGuard encryption rather than a TLS layer on top.
@@ -38,7 +38,7 @@ This remote doesn't try to reproduce the full Spotify Web Player experience — 
 
 - Linux with D-Bus available (`gdbus` on your `PATH`) — used for MPRIS transport commands.
 - [Node.js](https://nodejs.org/) 18+.
-- `ffmpeg` on your `PATH` — used to encode the HLS audio relay.
+- `ffmpeg` on your `PATH` — used to encode the audio relay.
 - A PipeWire or PulseAudio virtual sink named `spotify-remote-audio` for `ffmpeg` to capture from — see `openbox-autostart.example` for how to create one automatically on session start.
 - Chromium or Google Chrome, launched with remote debugging enabled and already logged into [open.spotify.com](https://open.spotify.com):
 

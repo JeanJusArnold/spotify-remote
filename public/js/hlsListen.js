@@ -1,8 +1,12 @@
-// Temporary test module - not a finished feature. Validates whether a
-// browser tab (hls.js, since Chrome has no native HLS support in
-// <audio>) playing the DIY HLS stream from server.js can survive
-// screen-off/backgrounded use well enough to be a viable AudioRelay
-// replacement, before committing to building a native Android app.
+// Plays the DIY continuous audio relay from server.js - a plain
+// Icecast/SHOUTcast-style ADTS-AAC stream now (see
+// [[continuous_audio_relay_redesign]]), replacing an earlier hls.js-based
+// version that played a segmented HLS manifest. No library needed any
+// more: a browser's native <audio> element handles a continuous stream
+// on its own, and there's no live-edge/segment-sync logic left to
+// reimplement (see the deleted skipToLiveEdge/LEVEL_LOADED/FRAG_BUFFERED
+// machinery this file used to carry - none of it has an equivalent need
+// for a plain continuous connection).
 //
 // Wired to the remote's own play/pause state (see updateState() in
 // player.js) rather than a separate control, so it mirrors Spotify's
@@ -11,7 +15,6 @@
 const audio = document.getElementById("hlsAudio");
 const marker = document.getElementById("hlsPositionMarker");
 
-let hls = null;
 let currentlyStreaming = false;
 let unlocked = false;
 
@@ -37,142 +40,39 @@ export function syncHlsToPlaybackState(playing) {
 
 // Called on every /state poll while playing (not just on the actual
 // pause->play transition), so this has to be a no-op once already
-// streaming - rebuilding hls.js on every single poll tore the stream
-// down and restarted it from scratch every ~2s, which sounded like
-// short loops of audio repeating before jumping to the next bit.
+// streaming - rebuilding on every single poll would tear the stream
+// down and restart it from scratch every ~2s.
 function resumeStream() {
 
     if (currentlyStreaming) return;
 
-    if (hls || audio.src) {
-        // already set up from earlier - the server just un-suspends the
-        // same encoder (SIGCONT) rather than restarting it, so there's
-        // nothing to rebuild, just resume playback
-        if (audio.paused) audio.play();
-        currentlyStreaming = true;
-        return;
-    }
-
-    startStream();
+    // Fresh src every resume, not just audio.play() on a stale element -
+    // the server spawns a genuinely new encoder/connection endpoint on
+    // every real resume (see ensureEncoderRunning in server.js), so
+    // there's nothing meaningful left on the old connection to resume
+    // from even if the browser kept it open.
+    audio.src = "/audio/stream.aac";
+    audio.play();
+    currentlyStreaming = true;
 
 }
 
-// A real pause (not muting, not tearing anything down) - the server
-// just suspends the encoder (SIGSTOP) rather than stopping it, so the
-// stream this instance is attached to is still the same one and there's
-// nothing to rebuild on resume.
+// Called on every poll while paused too, not just the transition.
 function pauseStream() {
 
-    // same reasoning as resumeStream - called on every poll while
-    // paused, not just on the transition
     if (!currentlyStreaming) return;
 
     audio.pause();
+    // Explicitly drops the connection rather than just pausing playback -
+    // matches the native app's own player.stop()-on-pause (see
+    // PlaybackService.applyLocalPlaying), and avoids leaving a live
+    // network connection open against an encoder the server is about to
+    // kill anyway (server.js's own endAllAudioClients() would force it
+    // closed regardless, but there's no reason for this side to hold it
+    // open in the meantime).
+    audio.removeAttribute("src");
+    audio.load();
     currentlyStreaming = false;
-
-}
-
-// Called from player.js's updateState() whenever the server reports a
-// new audioReadyGeneration - it bumps that once it has confirmed (via
-// waitForAudioSignal against the PC's real audio sink) that the new
-// track has actually started producing sound, which is what "caught up"
-// has to mean: jumping to hls.js's own live edge the instant a title
-// change is merely noticed lands inside the still-silent gap the
-// encoder captures during the real switch just as often as it lands on
-// real audio, since the phone-visible title change and the PC's actual
-// transition don't line up. Detecting that on the phone itself doesn't
-// help either - whatever the phone hears is itself several seconds
-// stale, so by the time it detects silence the real transition is long
-// over. The server checking its own source is the only place this can
-// be measured correctly.
-// hls.liveSyncPosition (its own internal notion of "the edge minus a
-// safety margin") turned out unreliable mid-session - it dropped to
-// near 0 at least once with a session that had long since buffered far
-// past that, jumping playback onto a position long since evicted from
-// the actual live window (delete_segments) and producing silence with
-// no way to recover short of a reload. audio.buffered is ground truth
-// (exactly what's actually been fetched, hls.js internals aside), so
-// anchoring to its own reported edge can't ever jump outside real data
-// - worst case it undershoots, which is silent-but-harmless, never
-// silent-and-broken.
-const LIVE_EDGE_SAFETY_MARGIN_SECONDS = 1;
-
-export function skipToLiveEdge() {
-    if (!audio.buffered.length) return;
-    const liveEdge = audio.buffered.end(audio.buffered.length - 1);
-    audio.currentTime = Math.max(0, liveEdge - LIVE_EDGE_SAFETY_MARGIN_SECONDS);
-}
-
-function startStream() {
-
-    if (window.Hls && window.Hls.isSupported()) {
-
-        // default targets 3 segments (~18s at our 6s segment length)
-        // behind live as a safety margin - too slow to start for real
-        // use, so this trims it to 1 segment (~6s) instead. Less margin
-        // against a delivery hiccup causing a stall, but the encoder's
-        // cadence has been stable in testing
-        //
-        // backBufferLength defaults to Infinity - confirmed live: with
-        // that default, audio.buffered's start never advances past
-        // wherever this session first attached, only its end keeps
-        // growing, holding onto every already-played second in memory
-        // for the whole session even though nothing here ever seeks
-        // backward (skipToLiveEdge only ever jumps forward). 30s is far
-        // more than the ~6s segment / ~1 segment sync margin actually in
-        // play, just enough slack that trimming can't ever compete with
-        // playback for the same data.
-        hls = new window.Hls({ liveSyncDurationCount: 1, backBufferLength: 30 });
-        hls.loadSource("/hls/stream.m3u8");
-        hls.attachMedia(audio);
-
-        hls.on(window.Hls.Events.MANIFEST_PARSED, () => audio.play());
-
-        // hls.js's own "start near live edge" logic on a fresh attach
-        // shares the same liveSyncPosition calculation already known to
-        // be unreliable (see skipToLiveEdge's own comment above) -
-        // confirmed here too: playback started stuck at position 0
-        // while audio.buffered only covered data far past that, with
-        // nothing ever reachable at the stuck position.
-        //
-        // Jumping on the very first FRAG_BUFFERED isn't right either -
-        // confirmed live: hls.js's own fetch order started from the
-        // oldest segment still listed in the playlist, not the newest,
-        // so the first buffered fragment lands nowhere near live. Only
-        // once every fragment from the initial playlist load has been
-        // buffered is audio.buffered.end() actually close to live -
-        // LEVEL_LOADED's fragment count (captured once, from the first
-        // playlist load only - later live-playlist refreshes fire it
-        // again with a shifted window, not relevant here) says how many
-        // to wait for.
-        let initialFragmentCount = null;
-        let fragmentsBuffered = 0;
-        let skippedToLive = false;
-
-        hls.on(window.Hls.Events.LEVEL_LOADED, (event, data) => {
-            if (initialFragmentCount === null) initialFragmentCount = data.details.fragments.length;
-        });
-
-        hls.on(window.Hls.Events.FRAG_BUFFERED, () => {
-            if (skippedToLive || initialFragmentCount === null) return;
-            fragmentsBuffered++;
-            if (fragmentsBuffered >= initialFragmentCount) {
-                skippedToLive = true;
-                skipToLiveEdge();
-            }
-        });
-
-        hls.on(window.Hls.Events.ERROR, (event, data) => {
-            console.log("hls.js error:", data);
-        });
-
-    } else if (audio.canPlayType("application/vnd.apple.mpegurl")) {
-        // Safari/iOS - native HLS support, no hls.js needed
-        audio.src = "/hls/stream.m3u8";
-        audio.play();
-    }
-
-    currentlyStreaming = true;
 
 }
 
@@ -192,6 +92,14 @@ function startStream() {
 // nothing to calibrate at runtime. Since the white bar only actually
 // changes value once per /state poll (2s), "8s ago" is just "4 polls
 // ago" - a small fixed-size queue, no timestamps needed.
+//
+// NOT re-measured for the continuous-broadcast redesign - the native
+// app's own equivalent constant (AUDIO_BUFFERING_DISPLAY_MS in
+// NowPlayingViewModel.kt) came down from 8000ms to ~4000ms under the new
+// pipeline, so this fixed 8s lookback is very likely too long now too.
+// Left as-is since this file is a legacy/unmaintained fallback, not
+// actively used day-to-day - re-measure by hand the same way if it
+// turns out to matter in practice.
 // ---------------------------------------------------------------------
 
 const HISTORY_LOOKBACK_ITERATIONS = 4; // 4 * 2s poll interval = 8s

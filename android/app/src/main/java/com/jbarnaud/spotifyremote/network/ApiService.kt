@@ -23,15 +23,8 @@ interface ApiService {
     @GET("/play")
     suspend fun play(): PlayResponse
 
-    // liveOffsetMs is this client's own Player.getCurrentLiveOffset() at
-    // the moment of the tap - lets the server's deferred-pause margin
-    // skip its extra safety segment when this client already has enough
-    // buffered runway from prior drift, instead of always taking the
-    // full 2-segment margin (which would otherwise only ever add more
-    // drift - see pauseSpotifyAndEncoder in server.js). 0/omitted falls
-    // back to the original always-full-margin behavior server-side.
     @GET("/pause")
-    suspend fun pause(@Query("liveOffsetMs") liveOffsetMs: Long = 0): PauseResponse
+    suspend fun pause(): PauseResponse
 
     @GET("/next")
     suspend fun next(): Response<Unit>

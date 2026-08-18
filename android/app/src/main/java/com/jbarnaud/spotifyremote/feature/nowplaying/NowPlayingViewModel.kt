@@ -74,17 +74,27 @@ class NowPlayingViewModel @Inject constructor(
     private val POSITION_DISPLAY_ADVANCE_MS = 0L
 
     // How long the "BUFFER" overlay stays up after next/previous/playing
-    // a specific track - matches HLS_SEGMENT_SECONDS/PlaybackService's
-    // own setTargetOffsetMs: the command lands on Spotify almost
-    // immediately, but the audio anyone actually hears always trails the
-    // live edge by about this much, so this is roughly how long the real
-    // audio result takes to arrive regardless of how fast the network
-    // round trip itself is. A plain fixed local timer, not tied to
+    // a specific track - the command lands on Spotify almost immediately,
+    // but the audio anyone actually hears always trails behind it: a
+    // fresh encoder spawn (see ensureEncoderRunning in server.js) plus
+    // the MPRIS round trip plus a small client buffer target
+    // (PlaybackService's DefaultLoadControl) before real, current audio
+    // is actually flowing. A plain fixed local timer, not tied to
     // waiting for any specific real push to land - deliberately simple
     // after the earlier attempt at precisely correlating a delay with
     // real server events turned out to be a lot of complexity for little
     // payoff (see [[live_buffer_display_delay]]).
-    private val AUDIO_BUFFERING_DISPLAY_MS = 8000L
+    //
+    // Re-tuned 2026-08-19 for the continuous-broadcast redesign (see
+    // [[continuous_audio_relay_redesign]]) - was 8000L under segmented
+    // HLS. Measured live, cross-referencing server [resume-timing] logs
+    // against PlaybackService's own playbackState transitions: two clean
+    // resume cycles both landed at READY ~2.5s after "encoder input
+    // ready", ~2.8s from the tap itself - consistently, no segment-grid
+    // wait left to inflate it. Some margin kept above the raw
+    // measurement for real audible sound (not just ExoPlayer's own
+    // READY) and normal variance.
+    private val AUDIO_BUFFERING_DISPLAY_MS = 4000L
 
     private val _audioBuffering = MutableStateFlow(false)
     private var audioBufferingClearJob: Job? = null
@@ -376,14 +386,13 @@ class NowPlayingViewModel @Inject constructor(
                 // stale manifest and makes the resulting silence
                 // longer, not shorter - confirmed live.
                 localPlaybackIntentTrigger.requestPlaying(false)
-                val liveOffsetMs = playbackStateRepository.currentLiveOffsetMs.value
                 // Catches the 409 mpris_blocked backstop (see
                 // StateResponse.mprisBlocked's own comment) - the button
                 // should already be disabled whenever this could happen,
                 // so a rejection here means the tap raced ahead of that,
                 // nothing meaningful to surface for it.
                 try {
-                    val response = apiService.pause(liveOffsetMs)
+                    val response = apiService.pause()
                     pauseDeadlineElapsedMs = SystemClock.elapsedRealtime() + response.pauseLandsInMs
                 } catch (e: Exception) { /* mpris_blocked backstop - see comment above */ }
             } else {

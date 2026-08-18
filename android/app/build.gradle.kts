@@ -76,9 +76,13 @@ dependencies {
     ksp("com.google.dagger:hilt-android-compiler:2.52")
     implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
 
-    // Media / HLS
+    // Media - plain progressive/continuous audio streaming (ADTS-AAC),
+    // no manifest format. media3-exoplayer-hls was dropped 2026-08-19
+    // (see [[continuous_audio_relay_redesign]]): it only ever existed to
+    // auto-detect the old .m3u8 stream URL - AdtsExtractor itself ships
+    // in media3-exoplayer's own transitive media3-extractor dependency,
+    // no HLS-specific artifact needed for it.
     implementation("androidx.media3:media3-exoplayer:1.4.1")
-    implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
     implementation("androidx.media3:media3-common:1.4.1")
     implementation("androidx.media3:media3-session:1.4.1")
 

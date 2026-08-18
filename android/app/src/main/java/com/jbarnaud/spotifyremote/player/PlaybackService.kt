@@ -18,6 +18,7 @@ import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -186,29 +187,25 @@ class PlaybackService : MediaSessionService() {
             .setHandleAudioBecomingNoisy(true)
             .setLoadControl(
                 // nothing here ever seeks backward - bounds memory
-                // growth over a long session, analog of hlsListen.js's
-                // backBufferLength: 30
+                // growth over a long session
                 //
                 // minBufferMs/maxBufferMs also explicitly set, both well
-                // below DefaultLoadControl's own defaults (50_000/50_000) -
-                // confirmed live via dumpsys media_session that the
-                // defaults caused a continuous READY<->BUFFERING flap
-                // (every ~200ms, indefinitely, during otherwise completely
-                // normal playback - position/buffered position both kept
-                // advancing at real-time the whole time, so nothing was
-                // actually stalling). Root cause: our HLS window is only
-                // HLS_LIST_SIZE*HLS_SEGMENT_SECONDS (~32s, see server.js)
-                // and playback targets ~4s behind the live edge, so at
-                // most ~28s of buffer ahead of the playhead can ever
-                // exist - never enough to satisfy a 50s minBufferMs, so
-                // ExoPlayer kept re-declaring itself insufficiently
-                // buffered against a target this stream can't reach, even
-                // though what it already had was more than enough to
-                // play smoothly. Each flap fired onIsPlayingChanged,
-                // which re-posted the notification every time - the
-                // visible symptom was the system media notification's
-                // pause button flickering. minBufferMs/maxBufferMs below
-                // are sized to comfortably fit inside that ~28s ceiling.
+                // below DefaultLoadControl's own defaults (50_000/50_000).
+                // Originally sized this way to fit inside a bounded HLS
+                // rolling-window ceiling (see [[continuous_audio_relay_redesign]]
+                // for why that design was replaced by a plain continuous
+                // stream) - kept at the same numbers here for a different
+                // reason now that the source is unbounded: a continuous
+                // feed gets no automatic ExoPlayer live-edge speed-up the
+                // way live HLS did, so nothing here ever self-corrects if
+                // the buffer grows after a network hiccup - it can only
+                // grow (more latency behind real PC audio) or reset via a
+                // fresh pause/resume reconnect. Keeping these numbers
+                // small bounds how far behind real-time a single hiccup
+                // can push things.
+                // Re-verify via dumpsys media_session (watch for READY/
+                // BUFFERING flapping) if these are ever revisited - don't
+                // assume they're still optimal unchecked.
                 DefaultLoadControl.Builder()
                     .setBackBuffer(30_000, true)
                     .setBufferDurationsMs(
@@ -375,14 +372,8 @@ class PlaybackService : MediaSessionService() {
         }
 
         override fun pause() {
-            // read directly off the player rather than through
-            // PlaybackStateRepository's copy - this call already has
-            // the real instance at hand, no reason to use a value that
-            // can be up to one poll tick stale
-            val offset = player.currentLiveOffset
-            val liveOffsetMs = if (offset != C.TIME_UNSET) offset else 0L
             localPlaybackIntentTrigger.requestPlaying(false)
-            serviceScope.launch { apiService.pause(liveOffsetMs) }
+            serviceScope.launch { apiService.pause() }
         }
 
         override fun seekToNext() {
@@ -399,19 +390,20 @@ class PlaybackService : MediaSessionService() {
 
         currentBaseUrl = baseUrl
 
-        Log.i(TAG, "Attaching HLS source at $baseUrl/hls/stream.m3u8")
+        Log.i(TAG, "Attaching audio stream at $baseUrl/audio/stream.aac")
 
+        // No LiveConfiguration/target offset - there's no live-edge
+        // concept for a plain continuous stream (see
+        // [[continuous_audio_relay_redesign]]), a fresh connection just
+        // starts receiving whatever the server is broadcasting right now.
+        // Explicit MIME type beats content-sniffing here specifically
+        // because every listener joins the shared broadcast mid-stream/
+        // mid-frame by construction (not a discrete file with a clean
+        // start) - skips the sniff-probe negotiation entirely and goes
+        // straight to Media3's AdtsExtractor.
         val mediaItem = MediaItem.Builder()
-            .setUri("$baseUrl/hls/stream.m3u8")
-            .setLiveConfiguration(
-                // ~1 segment behind live - server.js's HLS_SEGMENT_SECONDS
-                // (4s as of 2026-08-15, shortened from 6s specifically to
-                // cut down the silence at each dual-instance handoff - see
-                // [[dual_instance_hls_handoff]]; keep this in sync with it)
-                MediaItem.LiveConfiguration.Builder()
-                    .setTargetOffsetMs(4000)
-                    .build()
-            )
+            .setUri("$baseUrl/audio/stream.aac")
+            .setMimeType(MimeTypes.AUDIO_AAC)
             .build()
 
         player.setMediaItem(mediaItem)
@@ -507,32 +499,23 @@ class PlaybackService : MediaSessionService() {
     // need the exact same handling, not just a playWhenReady flip.
     private fun applyLocalPlaying(playing: Boolean) {
         if (playing) {
-            // Every real resume spawns a genuinely new encoder
-            // generation server-side, with its own init segment and
-            // fresh segment numbering (see [[dual_instance_hls_handoff]])
-            // - re-attaching instead of just flipping playWhenReady
-            // forces ExoPlayer to drop whatever stale period/timeline
-            // state it was holding and fetch that new generation's
-            // manifest fresh, jumping to ITS live edge. Confirmed live:
-            // after pausing and leaving the app backgrounded for a
-            // while, a bare playWhenReady=true played out only the
-            // already-buffered deferred-pause segments and then went
-            // silent - ExoPlayer never discovered the new generation's
-            // content on its own, apparently because its live-manifest
-            // refresh backs off the longer it sits idle/paused.
+            // Every real resume spawns a genuinely new encoder instance
+            // server-side, a fresh connection endpoint - re-attaching
+            // instead of just flipping playWhenReady is what actually
+            // opens that new connection; there's no old manifest/period
+            // to "discover" any more (see
+            // [[continuous_audio_relay_redesign]]), just a fresh HTTP GET.
             currentBaseUrl?.let { attachMediaSource(it) }
             player.playWhenReady = true
         } else {
             player.playWhenReady = false
-            // ExoPlayer's live-manifest refresh keeps polling on its own
-            // ~4s cadence even with playWhenReady=false - confirmed via
-            // server [traffic] logs showing manifest GETs continuing
-            // indefinitely after pause, at nearly the same radio cost as
-            // actual streaming (segment fetches are what stopped, not the
-            // poll itself). stop() tears down the HLS loader entirely,
-            // so nothing polls until the next real resume, which already
-            // rebuilds a fresh source from scratch via attachMediaSource
-            // above regardless of whether this ran.
+            // Tears down the actual live HTTP audio connection itself
+            // (not just a manifest poller, now that there's no manifest
+            // at all) - the direct mobile-radio-idle win this always
+            // existed for. Belt-and-suspenders with the server's own
+            // endAllAudioClients() (server.js, called the moment the
+            // encoder is killed) - whichever side gets there first, the
+            // connection ends either way.
             player.stop()
         }
     }
@@ -552,16 +535,6 @@ class PlaybackService : MediaSessionService() {
         // again.
         if (player.playWhenReady != state.playing) {
             applyLocalPlaying(state.playing)
-        }
-
-        // feeds the on-screen pause button's shield-margin decision
-        // (see NowPlayingViewModel.onPlayPauseClick and
-        // pauseSpotifyAndEncoder in server.js) - TIME_UNSET before the
-        // live window is established, skip the update rather than
-        // overwrite a real prior value with garbage
-        val liveOffsetMs = player.currentLiveOffset
-        if (liveOffsetMs != C.TIME_UNSET) {
-            playbackStateRepository.updateCurrentLiveOffsetMs(liveOffsetMs)
         }
 
         if (lastMetadataTitle != state.title) {

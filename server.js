@@ -25,33 +25,20 @@ const PORT = 3000;
 // which the old cert was only ever valid for) actually work - a cert
 // tied to one specific hostname can never validate against an IP.
 
-// DIY audio streaming, in progress alongside AudioRelay (not yet
-// replacing it): AudioRelay's own real-time/low-latency design keeps
-// the phone's radio and CPU constantly awake, draining battery, with no
-// hardware-decode path - measured ~150kbps, so bandwidth/codec choice
-// isn't the problem, only the real-time delivery is. This instead
-// captures the same virtual sink, encodes to Opus, and serves it as a
-// rolling HLS window - a phone-side player (ExoPlayer/Media3, not built
-// yet) can buffer far ahead, let the radio sleep between segment
-// fetches, and decode in hardware, at the cost of tolerable latency
-// (roughly segment-duration times a few, invisible for this project's
-// remote-control use case).
-const HLS_DIR = path.join(__dirname, "hls");
-// Shortened from 6s (2026-08-15): a rotation's minimum possible latency
-// is bounded by this - a segment can never close before its own nominal
-// duration elapses, regardless of how fast ffmpeg itself starts up.
-// Settled on 4s as the user's preferred latency/overhead balance.
-// HLS_LIST_SIZE below is scaled to keep roughly the same rolling-window
-// duration regardless of this value.
-const HLS_SEGMENT_SECONDS = 4;
-const HLS_LIST_SIZE = 8; // 4s * 8 = 32s window, close to the old 6s * 6 = 36s
-
-// The deferred-pause margin (see pauseSpotifyAndEncoder) targets this
-// much already-buffered runway on the client before it lets Spotify
-// actually stop - 2 segments. Also doubles as the threshold for
-// skipping the extra margin segment entirely when the client reports
-// it already has this much slack from prior drift.
-const PAUSE_MARGIN_TARGET_MS = HLS_SEGMENT_SECONDS * 1000 * 2;
+// DIY audio relay: captures the same virtual sink Chromium/Spotify play
+// through and rebroadcasts it live to any connected client - continuous
+// raw ADTS-AAC bytes over a single long-lived HTTP connection per
+// listener (Icecast/SHOUTcast-style), no manifest, no segments.
+//
+// Replaced a segmented-HLS design on 2026-08-19 (see
+// [[continuous_audio_relay_redesign]]): measured live against a real
+// continuous webradio stream (VLC/Icecast) under matching network
+// conditions, the segmented approach saved no mobile-radio power at all
+// (LTE/5G's own ~10-15s RRC tail timer never let the radio actually
+// sleep between our 4s segment/manifest polls) and cost ~3x more phone
+// CPU (per-segment container parsing + manifest refetch + live-edge
+// speed convergence), for no offsetting benefit in this single-client,
+// LAN-via-Tailscale use case.
 
 // Single, persistent sink - always linked to the real audio chain (the
 // last hop of the existing EasyEffects processing, set up outside this
@@ -128,216 +115,67 @@ async function waitForAudioSignal() {
     }
 }
 
-// ffmpeg only ever writes ONE #EXT-X-MAP per manifest, at the top,
-// applying it to every segment currently listed - correct within a
-// single generation, but wrong for the whole crossover window after a
-// resume, where append_list (see spawnEncoderInstance) deliberately
-// keeps the outgoing generation's still-unevicted segments (genuinely
-// encoded against a DIFFERENT init-gN.mp4) alongside the new ones.
-// ffmpeg does correctly emit its own #EXT-X-DISCONTINUITY at that
-// boundary, just not a second #EXT-X-MAP to go with it.
-//
-// A pure text transform, not a disk rewrite: an earlier version of this
-// fix (2026-08-16) patched the file on disk in place, from the same
-// fs.watch callback that tracks segment boundaries - confirmed live
-// that this made pausing unreliable and live-offset drift run away,
-// because it wrote to the exact filename ("stream.m3u8") that
-// waitForNextManifestUpdate's own fs.watch listens for, racing its
-// event-driven pause-margin timer against a second, unrelated writer to
-// the same file. Applying the same correction at request time instead -
-// nothing here ever touches disk - means the manifest file on disk stays
-// exactly what ffmpeg itself wrote, once per real segment boundary, so
-// the pause timer keeps seeing exactly the events it expects.
-function patchManifestGenerationMaps(text) {
+// Every currently-connected /audio/stream.aac HTTP response - the
+// broadcast set. One shared continuous byte stream (Icecast/SHOUTcast-
+// style): no manifest, no segments, no per-client encoding. A client can
+// sit in this set with nothing yet written to it (connected while
+// paused - see the route handler's own comment) or actively receive
+// live ADTS-AAC bytes as ffmpeg produces them.
+const audioClients = new Set();
 
-    const lines = text.split("\n").filter((l) => l.length > 0);
+// Bounds a single slow/stalled client's memory growth without stalling
+// broadcast to every OTHER client. res.write() itself never blocks the
+// event loop - Node queues each response's outgoing bytes independently
+// in its own per-socket buffer - so the risk isn't "the loop stalls,"
+// it's "one dead client's queue grows forever." ~24s of 128kbps audio -
+// generous enough to ride out a transient hiccup, small enough that a
+// genuinely stuck client (screen off + bad radio handoff, app killed
+// without a clean close, etc.) gets dropped well before it could leak
+// meaningfully.
+const MAX_CLIENT_BUFFERED_BYTES = 384 * 1024;
 
-    const headerLines = [];
-    const entries = []; // { extinf, programDateTime, filename, generation }
-
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        // stripped unconditionally and rebuilt below - makes this
-        // idempotent regardless of what ffmpeg itself already wrote
-        if (line.startsWith("#EXT-X-MAP:") || line.startsWith("#EXT-X-DISCONTINUITY")) continue;
-        if (line.startsWith("#EXTINF:")) {
-            // with hls_flags program_date_time, ffmpeg inserts an
-            // #EXT-X-PROGRAM-DATE-TIME line between #EXTINF: and the
-            // filename for every segment - confirmed via an isolated
-            // ffmpeg run - so the filename may be one line further out.
-            let next = i + 1;
-            const programDateTime = lines[next] && lines[next].startsWith("#EXT-X-PROGRAM-DATE-TIME:") ? lines[next] : null;
-            if (programDateTime) next++;
-            const filename = lines[next];
-            const m = filename && filename.match(/^seg-g(\d+)-\d+\.m4s$/);
-            if (m) {
-                entries.push({ extinf: line, programDateTime, filename, generation: Number(m[1]) });
-                i = next; // consumed through the filename line above
-                continue;
-            }
-        }
-        if (entries.length === 0) headerLines.push(line);
+// Called from pauseSpotifyAndEncoder right where the encoder is
+// SIGKILLed - gives every connected client a clean EOF instead of a
+// silently-hanging connection. Android's own player.stop() (driven by
+// the same pause event over /state-stream) usually gets there first,
+// but this is a cheap, correct backstop that also covers the legacy web
+// <audio> client, which has no equivalent teardown of its own.
+function endAllAudioClients() {
+    for (const res of audioClients) {
+        try { res.end(); } catch { /* already closing */ }
     }
-
-    if (entries.length === 0) return text;
-    if (new Set(entries.map((e) => e.generation)).size <= 1) return text; // ffmpeg's own single map is already correct
-
-    const out = [...headerLines];
-    let lastGeneration = null;
-    for (const entry of entries) {
-        if (entry.generation !== lastGeneration) {
-            if (lastGeneration !== null) out.push("#EXT-X-DISCONTINUITY");
-            out.push(`#EXT-X-MAP:URI="${initFilenameFor(entry.generation)}"`);
-            lastGeneration = entry.generation;
-        }
-        out.push(entry.extinf);
-        if (entry.programDateTime) out.push(entry.programDateTime);
-        out.push(entry.filename);
-    }
-    out.push("");
-
-    return out.join("\n");
-
+    audioClients.clear();
 }
 
-// Intercepts only the manifest itself - segment/init files (the vast
-// majority of requests) fall through to express.static below unchanged.
-// See patchManifestGenerationMaps for why this is a read-time transform
-// rather than a disk rewrite.
-app.get("/hls/stream.m3u8", (req, res) => {
-    let text;
-    try {
-        text = fs.readFileSync(path.join(HLS_DIR, "stream.m3u8"), "utf8");
-    } catch {
-        res.status(404).end();
-        return;
-    }
-    res.set("Cache-Control", "no-store");
-    res.type(".m3u8").send(patchManifestGenerationMaps(text));
+// Continuous ADTS-AAC broadcast - Icecast/SHOUTcast-style: one
+// long-lived connection per listener, raw encoded bytes, no manifest.
+// Headers are sent (and flushed) immediately on connect regardless of
+// whether an encoder is currently running: a listener joining while
+// paused just holds the connection open with nothing written yet,
+// exactly like an Icecast listener joining an idle mount point - the
+// next resume's broadcast loop (see spawnEncoderInstance) starts
+// writing to this same res the moment it exists, since it's already in
+// audioClients.
+app.get("/audio/stream.aac", (req, res) => {
+
+    res.writeHead(200, {
+        "Content-Type": "audio/aac",
+        "Cache-Control": "no-store",
+        "Connection": "keep-alive"
+    });
+    res.flushHeaders();
+
+    audioClients.add(res);
+    req.on("close", () => audioClients.delete(res));
+
 });
 
-app.use("/hls", express.static(HLS_DIR));
-
-// HLS only ever delivers whole, completed segments - the client can't
-// see a segment that's still being written. Tracking when each segment
-// actually started lets pausing wait for just the remainder of the
-// current one instead of a blind full segment's worth - see
-// msUntilCurrentSegmentCompletes().
-let lastSegmentBoundaryTime = Date.now();
-
-// Root-caused 2026-08-17 via live [pause-timing]/[silence] instrumentation:
-// pauseSpotifyAndEncoder used to send MPRIS Pause only once the final
-// margin segment had already fully closed, then SIGKILL the instance -
-// with a measured 0ms gap between the two. Whatever real audio Spotify
-// was still producing at that instant (its own reaction to MPRIS Pause
-// takes a beat, measured at the same ~100-150ms order as the resume-side
-// silenceremove numbers above) was mid-encode into the NEXT segment and
-// got discarded by the SIGKILL before ffmpeg ever flushed it - and per
-// [[dual_instance_hls_handoff]]'s own established finding, that's exactly
-// the content the client's target-offset resumes into, not an inaudible
-// already-skipped gap. Fixed by sending Pause this much BEFORE the final
-// margin segment's natural close instead of after, so Spotify's real
-// silence has time to land inside that still-open segment before it
-// closes on its own - ffmpeg then flushes it cleanly and only the
-// (already-silent) start of the following segment is ever discarded.
-// This deliberately keeps every segment's duration uniform/nominal (the
-// client's target-offset-based resume-position math implicitly assumes
-// that) - a small (~150-400ms) silent residual is left in the final
-// segment on purpose, as the cost of that.
-//
-// Two dead-end detours tried the same day to trim that residual away
-// entirely, both reverted - kept here so they don't get re-proposed:
-// 1. `silenceremove`'s stop_* options + SIGKILL: dead end, confirmed via
-//    an isolated synthetic test - stop-mode only releases its held
-//    buffer on a genuine stream EOF, which a SIGKILL'd never-ending pulse
-//    capture never reaches (the pipeline just froze, nothing flushed).
-// 2. stop_* + a graceful SIGTERM instead of SIGKILL (SIGTERM DOES supply
-//    that EOF, confirmed live - a real fix for the pause-time freeze).
-//    But adding stop_periods=1 (positive) to the ALWAYS-RUNNING filter
-//    chain isn't scoped to the deliberate pause moment - it engages on
-//    the very FIRST silence period the encoder ever sees, including a
-//    perfectly ordinary quiet passage in the middle of a track being
-//    listened to normally, and then never releases its held buffer
-//    again even once real audio resumes (positive stop_periods means
-//    "treat this as the end", not "skip this many periods and keep
-//    going" - confirmed against ffmpeg's own filter docs). Confirmed
-//    live: this froze the encoder mid-track (real user impact - "plus de
-//    son"), well before any pause was ever requested. Reverted entirely.
+// Spotify's own real reaction latency to a Pause command - measured live
+// via [pause-timing]/[silence] instrumentation, order ~100-150ms for
+// Spotify itself plus D-Bus round-trip overhead, ~400ms all in. Used by
+// pauseSpotifyAndEncoder to wait for that real audio to actually stop
+// before killing the encoder, instead of cutting it off mid-sound.
 const PAUSE_REACTION_LEAD_MS = 400;
-
-// Resolves the moment the manifest file itself next changes - i.e. a
-// segment just closed. Deliberately not keyed off segment file
-// CREATION the way watchHlsSegmentBoundaries below is: a file appears
-// at the START of its ~4s writing window, well before it's actually
-// complete - ffmpeg only rewrites the manifest once a segment is fully
-// closed, so reacting to THAT event is the real, unambiguous completion
-// signal. The event-driven building block pauseSpotifyAndEncoder uses
-// to wait for real segment-close boundaries instead of guessing from a
-// timer (see [[precise_segment_live_edge_seek]] for why a time guess
-// isn't good enough here).
-// generous safety net in case the encoder is somehow stuck and never
-// closes another segment (shouldn't happen - a fresh instance every
-// resume avoids the old long-uptime manifest-duration-drift bug - but
-// pauseSpotifyAndEncoder must never hang forever waiting for this)
-const MANIFEST_UPDATE_WAIT_TIMEOUT_MS = HLS_SEGMENT_SECONDS * 1000 * 3;
-
-function waitForNextManifestUpdate() {
-    return new Promise((resolve) => {
-        const watcher = fs.watch(HLS_DIR, (eventType, filename) => {
-            if (filename !== "stream.m3u8") return;
-            watcher.close();
-            clearTimeout(timeout);
-            resolve();
-        });
-        const timeout = setTimeout(() => { watcher.close(); resolve(); }, MANIFEST_UPDATE_WAIT_TIMEOUT_MS);
-    });
-}
-
-// Only ever needs to run once (a single fs.watch stays alive and keeps
-// firing for the whole process lifetime) - but is called from both
-// startFreshHlsPipeline (boot, or after a pause fully stopped the
-// encoder) and resumeHlsEncoder (spawning directly, not through
-// startFreshHlsPipeline). Confirmed live (2026-08-15): without this
-// guard, a session that boots with Spotify already paused (so
-// startFreshHlsPipeline never runs) never wires this up at all,
-// leaving lastSegmentBoundaryTime stuck at module-load time forever -
-// harmless for the event-driven pause wait itself (that uses
-// waitForNextManifestUpdate, not this), but wrong for /pause's
-// reported pauseLandsInMs estimate.
-//
-// Keyed off the MANIFEST update, not segment file creation (was, until
-// 2026-08-17) - confirmed live via [boundary-debug] logging that segment
-// files are NOT created near the start of their ~4s writing window as
-// previously assumed; the creation event for a segment's file fires
-// close to ITS OWN close (measured: ~4.3s after the encoder started for
-// the very first segment, ~4s after the previous one for subsequent
-// ones). That made `elapsed` here structurally wrong by up to a full
-// segment for a while after every resume, causing `pauseLandsInMs` to
-// under-report by as much as ~2s in a live A/B comparison
-// ([segment-close-timing] logging in pauseSpotifyAndEncoder). The
-// manifest, by contrast, is only ever rewritten once a segment is
-// genuinely fully closed (the same signal waitForNextManifestUpdate
-// already relies on) - and since segments are always back-to-back with
-// no gap, "the last segment just closed" and "the current segment just
-// started" are the same instant, so this is a correct, not just
-// convenient, substitute.
-let segmentBoundaryWatcherStarted = false;
-
-function watchHlsSegmentBoundaries() {
-    if (segmentBoundaryWatcherStarted) return;
-    segmentBoundaryWatcherStarted = true;
-    fs.mkdirSync(HLS_DIR, { recursive: true });
-    fs.watch(HLS_DIR, (eventType, filename) => {
-        if (filename !== "stream.m3u8") return;
-        lastSegmentBoundaryTime = Date.now();
-    });
-}
-
-function msUntilCurrentSegmentCompletes() {
-    const elapsed = Date.now() - lastSegmentBoundaryTime;
-    const remaining = HLS_SEGMENT_SECONDS * 1000 - elapsed;
-    return Math.max(0, remaining);
-}
 
 // spawn() children aren't tied to the parent's lifetime - killing this
 // node process (even just Ctrl-C) left ffmpeg running orphaned in the
@@ -358,28 +196,9 @@ function msUntilCurrentSegmentCompletes() {
 let encoderGeneration = 0;
 let currentInstance = null;
 
-function segmentPrefixFor(generation) {
-    return `seg-g${generation}-`;
-}
-
-function initFilenameFor(generation) {
-    return `init-g${generation}.mp4`;
-}
-
 function spawnEncoderInstance(sinkName) {
 
     const generation = ++encoderGeneration;
-    const segmentPrefix = segmentPrefixFor(generation);
-    // Seeds lastSegmentBoundaryTime for this generation's own first
-    // segment - the manifest-update-based tracking in
-    // watchHlsSegmentBoundaries has nothing to react to yet at this
-    // point (no segment has closed since this instance started), so
-    // without this, msUntilCurrentSegmentCompletes() would keep using
-    // whatever stale value was left over from BEFORE this resume
-    // (confirmed live: this alone accounted for the full ~2s of drift
-    // measured right after a resume, on top of the file-creation-based
-    // bug watchHlsSegmentBoundaries' own comment already covers).
-    lastSegmentBoundaryTime = Date.now();
 
     const ffmpeg = spawn("ffmpeg", [
         "-f", "pulse", "-i", `${sinkName}.monitor`,
@@ -431,58 +250,14 @@ function spawnEncoderInstance(sinkName) {
         // so encoding above that here would just be re-inflating an
         // already-capped source, not preserving extra fidelity
         "-acodec", "aac", "-b:a", "128k",
-        "-f", "hls",
-        "-hls_time", String(HLS_SEGMENT_SECONDS),
-        "-hls_list_size", String(HLS_LIST_SIZE),
-        // append_list: continue the existing manifest (if any) instead
-        // of truncating it - validated separately (including
-        // concurrently with an outgoing instance still alive and
-        // writing) not to corrupt or collide; confirmed harmless to use
-        // unconditionally even for the very first instance ever spawned
-        // (nothing to append to yet, so it just behaves as a fresh
-        // manifest)
-        //
-        // 2026-08-16: briefly dropped this to fix a click at the
-        // generation boundary (ffmpeg only ever writes ONE #EXT-X-MAP
-        // at the top of the manifest, so appending a new generation's
-        // segments onto the outgoing one's still-unevicted tail left
-        // old segments - genuinely encoded against a DIFFERENT
-        // init-gN.mp4 - claimed under the new generation's map, an
-        // audible click at the crossover). Reverted immediately:
-        // without append_list every resume starts the manifest over
-        // with just 1 segment in the window, and it takes the full
-        // hls_list_size*HLS_SEGMENT_SECONDS (~32s) to refill - confirmed
-        // live this made the post-resume gap much WORSE, not better
-        // (the live client needs real window depth to establish its
-        // live edge at all). Kept append_list for the depth; the map
-        // mismatch itself is fixed separately, at request time, by
-        // patchManifestGenerationMaps.
-        //
-        // program_date_time: needed for the client's Player.getCurrentLiveOffset()
-        // to resolve to a real value instead of permanently C.TIME_UNSET
-        // (Media3 requires it to compute live offset) - this is what
-        // makes the adaptive pause-margin skip (see PAUSE_MARGIN_TARGET_MS)
-        // actually functional instead of always falling back to the full
-        // extra segment's wait. patchManifestGenerationMaps was updated
-        // to preserve the #EXT-X-PROGRAM-DATE-TIME line ffmpeg inserts
-        // between #EXTINF: and the filename for every segment.
-        "-hls_flags", "append_list+delete_segments+omit_endlist+program_date_time",
-        // fMP4/CMAF segments, not classic .ts - AAC-in-TS would also be
-        // fine, but fMP4 is already known-working and there's no reason
-        // to touch the container while only swapping the audio codec
-        "-hls_segment_type", "fmp4",
-        "-hls_fmp4_init_filename", initFilenameFor(generation),
-        // append_list computes the REAL start number itself, live, off
-        // however many entries are actually in the manifest at THIS
-        // process's own init time (not at spawn() time) - confirmed via
-        // the scratch testing that this self-adjusts correctly even if
-        // an outgoing instance keeps appending more of its own entries
-        // during this process's startup, so there's no need to compute
-        // or pass a real offset here
-        "-start_number", "0",
-        "-hls_segment_filename", path.join(HLS_DIR, `${segmentPrefix}%03d.m4s`),
-        path.join(HLS_DIR, "stream.m3u8")
-    ]);
+        // Raw ADTS-AAC elementary stream to stdout - no container, no
+        // manifest. Each ADTS frame carries its own header, so a client
+        // joining mid-stream (every listener, by construction - see
+        // /audio/stream.aac's own comment) can lock onto the next frame
+        // boundary on its own, the same way any Icecast/SHOUTcast AAC
+        // player already handles a mid-broadcast join.
+        "-f", "adts", "pipe:1"
+    ], { stdio: ["ignore", "pipe", "pipe"] });
 
     const log = fs.createWriteStream(path.join(__dirname, "hls-encoder.log"), { flags: "a" });
     ffmpeg.stderr.pipe(log);
@@ -527,7 +302,23 @@ function spawnEncoderInstance(sinkName) {
     };
     ffmpeg.stderr.on("data", silenceListener);
 
-    const instance = { generation, sinkName, segmentPrefix, process: ffmpeg, exited: false, inputReady };
+    // The actual broadcast: every raw ADTS byte ffmpeg produces goes to
+    // every currently-connected client, unmodified, as soon as it
+    // arrives. See MAX_CLIENT_BUFFERED_BYTES's own comment for how a
+    // slow client is isolated from the others instead of stalling this
+    // loop.
+    ffmpeg.stdout.on("data", (chunk) => {
+        for (const res of audioClients) {
+            if (res.writableLength > MAX_CLIENT_BUFFERED_BYTES) {
+                audioClients.delete(res);
+                res.destroy();
+                continue;
+            }
+            res.write(chunk);
+        }
+    });
+
+    const instance = { generation, sinkName, process: ffmpeg, exited: false, inputReady };
 
     ffmpeg.on("exit", (code, signal) => {
         instance.exited = true;
@@ -554,25 +345,9 @@ function waitForEncoderInputReady(instance) {
     ]);
 }
 
-// Must run exactly once per real server process start, regardless of
-// whether Spotify happens to be playing or paused at that moment -
-// confirmed live (2026-08-15): a restart landing while paused used to
-// skip this entirely (only startFreshHlsPipeline cleared the directory,
-// and that path only ran if Spotify was already playing at boot), so a
-// later /play would append_list onto whatever manifest/segments a
-// PREVIOUS, unrelated server process had left behind - harmless-looking
-// in the manifest text, but a real risk of two different processes'
-// generation counters (each starting fresh at 1 in memory) eventually
-// colliding on the same filename.
-function clearStaleHlsDir() {
-    fs.mkdirSync(HLS_DIR, { recursive: true });
-    for (const f of fs.readdirSync(HLS_DIR)) fs.unlinkSync(path.join(HLS_DIR, f));
-}
-
 // Only for a genuinely fresh pipeline start (boot, or nothing alive to
 // resume from - see resumeHlsEncoder) - starts the very first instance.
 function startFreshHlsPipeline() {
-    watchHlsSegmentBoundaries();
     currentInstance = spawnEncoderInstance(HLS_SINK);
 }
 
@@ -589,33 +364,6 @@ function stopAllEncoderInstances() {
     // an instance mid-shutdown some other way, so keep using SIGKILL,
     // which works unconditionally regardless of stop state.
     if (currentInstance && !currentInstance.exited) currentInstance.process.kill("SIGKILL");
-}
-
-// Any file left behind whose generation isn't the currently alive
-// instance's, and isn't referenced by the current manifest, is a
-// leftover with no future use - either an older generation's segments
-// that delete_segments already evicted from the manifest text but never
-// deleted from disk (confirmed via earlier scratch testing: it only
-// trims manifest entries, not files), or a killed instance's own final,
-// unfinished segment from the moment it got killed mid-write (never
-// referenced - see spawnEncoderInstance's own comment on why that's
-// always safe).
-function sweepOrphanedSegmentFiles() {
-
-    let manifestText = "";
-    try { manifestText = fs.readFileSync(path.join(HLS_DIR, "stream.m3u8"), "utf8"); } catch {}
-
-    const keepGeneration = currentInstance?.generation;
-
-    for (const f of fs.readdirSync(HLS_DIR)) {
-        const match = f.match(/^(?:seg-g(\d+)-\d+|init-g(\d+))\.(?:m4s|mp4)$/);
-        if (!match) continue;
-        const generation = Number(match[1] ?? match[2]);
-        if (generation === keepGeneration) continue;
-        if (manifestText.includes(f)) continue;
-        try { fs.unlinkSync(path.join(HLS_DIR, f)); } catch {}
-    }
-
 }
 
 // /state must still report the user's actual intent right away, or a
@@ -763,135 +511,43 @@ function requiresMprisUnblocked(handler) {
     };
 }
 
-// Pause used to just freeze the encoder (SIGSTOP) at the current
-// segment boundary and pause Spotify at the same instant - simple, but
-// meant resume had to un-suspend that same frozen process, which this
-// project's own dual-instance work (see [[dual_instance_hls_handoff]])
-// showed doesn't compose well with wanting a fresh, reliably-timed
-// instance on every resume.
-//
-// Redesigned 2026-08-15 around the fact that pause/resume are the one
-// place this server can control BOTH sides of the timing - its own
-// MPRIS command AND its own encoder state - unlike a track transition,
-// where Spotify's internal crossfade timing is opaque. Pause: let the
-// current instance keep capturing real audio for its current segment
-// AND one more full one (event-driven waits, see
-// waitForNextManifestUpdate - not a blind sleep), THEN send the MPRIS
-// pause and kill it. The phone perceives the pause immediately (state.
-// playing flips right away - see pendingPlayingIntent below) but keeps
-// buffering in the background while paused, so those two extra real
-// segments end up already sitting in its own local buffer. Resume:
-// spawn a brand new instance, wait for it to confirm it's actually
-// consuming (inputReady) before ever sending MPRIS play - guaranteeing
-// nothing is lost from the very first sample once Spotify starts making
-// sound again. Between the two: the phone plays out its own
-// already-buffered tail (those 2 segments) while the fresh instance
-// spins up in the background, so a normal-length pause is perceived as
-// gapless on resume without needing any precise cross-device timing at
-// all - see [[dual_instance_hls_handoff]] for the full reasoning trail.
-//
-// STALE as of 2026-08-16: PlaybackService.applyLocalPlaying now fully
-// re-prepares the player on every resume (its own comment explains why -
-// a bare playWhenReady=true stopped picking up the new generation after
-// a long pause), which throws away whatever buffered tail it had and
-// re-fetches the manifest fresh instead. The "no precise cross-device
-// timing needed" part above no longer describes the client's real
-// behavior - a fresh fetch can land mid-crossover-window, but the
-// #EXT-X-MAP mismatch that used to imply is now fixed at request time
-// by patchManifestGenerationMaps (see spawnEncoderInstance's
-// append_list comment for the full history).
-//
-// Made adaptive 2026-08-15: real Spotify audio keeps playing for this
-// entire wait, while the phone's own audible output already stopped
-// the instant the tap landed (pendingPlayingIntent, right below) - so
-// every pause, by construction, pushes the phone's live offset further
-// behind real time by up to however long this wait takes. An
-// unconditional 2-segment wait would make that drift only ever grow
-// over a session with many taps. The client already knows its own
-// current live offset (Media3's currentLiveOffset) and reports it as
-// clientLiveOffsetMs - if it's already at least PAUSE_MARGIN_TARGET_MS
-// behind, it already has all the buffered runway this margin exists to
-// build up, so the extra segment is skipped and only the in-flight one
-// is finished (never skipped - killing ffmpeg mid-segment would leave
-// a corrupt tail). This is what actually keeps the drift bounded
-// instead of growing with every pause, with no playback-speed/pitch
-// manipulation involved at all.
-async function pauseSpotifyAndEncoder(clientLiveOffsetMs = 0) {
+// Simplified 2026-08-19 for the continuous-broadcast redesign (see
+// [[continuous_audio_relay_redesign]]): no more segment-boundary
+// alignment to wait for - there's no manifest to keep consistent, so
+// pause can commit essentially immediately instead of the old 3-wait
+// segment-aligned sequence (finish in-flight segment / optional margin
+// segment / lead-time wait). mprisBlocked is now set right away too, so
+// unlike the old multi-second deferred-pause window, there's no
+// meaningful gap left for a competing /play to race into - the 409
+// reject at the route layer already closes that from the very start
+// (see requiresMprisUnblocked). PAUSE_REACTION_LEAD_MS is reused as-is:
+// it represents Spotify's own real pause-reaction latency, unchanged by
+// this redesign - only what it's no longer being aligned against does.
+async function pauseSpotifyAndEncoder() {
 
-    const myGeneration = actionGeneration;
-    const skipExtraMargin = clientLiveOffsetMs >= PAUSE_MARGIN_TARGET_MS;
-    // Captured once, up front, rather than re-reading currentInstance
-    // throughout - guards against a racing /play reassigning
-    // currentInstance to a freshly-resumed instance while this one is
-    // still in its final wait/kill sequence below.
     const encoderToStop = currentInstance;
 
-    // Precision check for msUntilCurrentSegmentCompletes()'s own estimate
-    // (used elsewhere for /pause's reported pauseLandsInMs) - confirmed
-    // live 2026-08-17 this estimate can drift badly when called right
-    // after an observed manifest-close event, but never checked at a
-    // RANDOM tap time (this call pattern) against a REAL measurement.
-    // Logs both so the actual drift for this specific pattern is known
-    // instead of assumed either way.
-    const tapAt = Date.now();
-    const estimatedMsToSegmentClose = (encoderToStop && !encoderToStop.exited) ? msUntilCurrentSegmentCompletes() : null;
-
-    if (encoderToStop && !encoderToStop.exited) {
-        await waitForNextManifestUpdate(); // finish whatever segment is already in progress
-        if (estimatedMsToSegmentClose !== null) {
-            const realMs = Date.now() - tapAt;
-            console.log(`[segment-close-timing] estimate=${estimatedMsToSegmentClose}ms real=${realMs}ms drift=${realMs - estimatedMsToSegmentClose}ms`);
-        }
-        if (myGeneration !== actionGeneration) return;
-        if (!skipExtraMargin) {
-            await waitForNextManifestUpdate(); // one more full segment of margin - skipped when the client already has enough slack from prior drift
-            if (myGeneration !== actionGeneration) return;
-        }
-        // Lead-time fix (see PAUSE_REACTION_LEAD_MS): whichever segment
-        // we're now inside (having just observed its start via the
-        // manifest update above) is the one Pause needs to land inside -
-        // wait only until shortly before its natural close, instead of
-        // waiting for it to close and pausing on top of that.
-        const leadWaitMs = Math.max(0, HLS_SEGMENT_SECONDS * 1000 - PAUSE_REACTION_LEAD_MS);
-        if (leadWaitMs > 0) await new Promise((r) => setTimeout(r, leadWaitMs));
-        if (myGeneration !== actionGeneration) return;
-    }
-
-    // a play (or another pause) landed while the above was waiting -
-    // whichever it was already handled things its own way, this stale
-    // pause has nothing left to correctly do
-    if (myGeneration !== actionGeneration) return;
-
-    // Committed from here on (no generation check for the rest of this
-    // function) - this is the real danger window mprisBlocked exists
-    // for, now that it starts exactly here instead of being guessed at
-    // from the client side.
     mprisBlocked = true;
     pushStateIfChanged();
 
     try {
 
-        // Micro-gap timing instrumentation - cross-reference against the
-        // [silence] logs from the stopped instance's own silencedetect filter
-        // to see whether real audio actually goes silent before or after
-        // this D-Bus round trip / the SIGKILL below.
-        console.log(`[pause-timing] margin wait resolved at ${Date.now()} (gen=${myGeneration})`);
-
         let ok = await mprisCommand("Pause");
-        console.log(`[pause-timing] MPRIS Pause acked at ${Date.now()} (gen=${myGeneration})`);
+        console.log(`[pause-timing] MPRIS Pause acked at ${Date.now()}`);
         if (!ok) {
             const alreadyPlaying = (await controls.playPause.getAttribute("aria-label")) === "Pause";
             if (alreadyPlaying) await controls.playPause.click({ noWaitAfter: true });
         }
 
-        // Once Pause has actually been sent we're committed: let the
-        // segment we just landed inside close naturally so ffmpeg flushes
-        // it cleanly, THEN kill - only the (already-silent) start of the
-        // segment after that ever gets discarded.
-        if (encoderToStop && !encoderToStop.exited) await waitForNextManifestUpdate();
+        // Give Spotify's real audio time to actually stop before cutting
+        // the encoder - same measured reaction lag as before, just no
+        // longer waiting for a segment boundary on top of it.
+        await new Promise((r) => setTimeout(r, PAUSE_REACTION_LEAD_MS));
+
         if (encoderToStop && !encoderToStop.exited) encoderToStop.process.kill("SIGKILL");
-        console.log(`[pause-timing] ffmpeg gen=${myGeneration} killed at ${Date.now()}`);
+        console.log(`[pause-timing] ffmpeg gen=${encoderToStop?.generation} killed at ${Date.now()}`);
         if (currentInstance === encoderToStop) currentInstance = null;
+        endAllAudioClients();
 
         // Not re-pushed here on purpose - confirmed live this was a real
         // race: pendingPlayingIntent clearing right as the real MPRIS pause
@@ -928,13 +584,10 @@ async function ensureEncoderRunning() {
 
     if (currentInstance && !currentInstance.exited) return;
 
-    watchHlsSegmentBoundaries();
-
     const incoming = spawnEncoderInstance(HLS_SINK);
     currentInstance = incoming;
 
     await waitForEncoderInputReady(incoming);
-    sweepOrphanedSegmentFiles();
 
 }
 
@@ -1272,48 +925,19 @@ app.get("/play", requiresMprisUnblocked(async (req, res) => {
     resumeHlsEncoder();
 }));
 
-// liveOffsetMs is the client's own current distance from the live edge
-// (Media3's currentLiveOffset, or equivalent) - see
-// pauseSpotifyAndEncoder's own comment for why this is what makes the
-// margin adaptive instead of a fixed 2 segments every time. Missing or
-// unparsable defaults to 0, i.e. the original always-take-the-full-
-// margin behavior. Still used for that adaptive margin - unrelated to
-// the shield redesign above, this is about how long
-// pauseSpotifyAndEncoder waits before considering the segment safe to
-// commit to, not about client UI timing.
 app.get("/pause", requiresMprisUnblocked(async (req, res) => {
 
     actionGeneration++;
     pendingPlayingIntent = false;
     pushStateIfChanged();
 
-    const clientLiveOffsetMs = Number(req.query.liveOffsetMs) || 0;
-    const skipExtraMargin = clientLiveOffsetMs >= PAUSE_MARGIN_TARGET_MS;
-
-    // Not for shielding anymore (mprisBlocked replaced that) - still
-    // needed by the client's own position-extrapolation display, since
-    // the real PC-side Spotify position keeps advancing until this
-    // deferred pause actually lands (see NowPlayingViewModel.kt's
-    // pauseDeadlineElapsedMs).
-    //
-    // Must mirror pauseSpotifyAndEncoder's own wait sequence EXACTLY -
-    // confirmed live 2026-08-18 this had silently drifted out of sync
-    // with it by a whole extra ~3.6s (missing the lead-time wait added
-    // after this formula was originally written), which the user
-    // noticed as the on-screen seekbar freezing then visibly jumping
-    // forward once the real pause actually landed well after the
-    // client's own deadline-based extrapolation had already frozen.
-    // Three waits, not two: finish the segment already in progress,
-    // optionally one more full segment of margin, THEN the lead-time
-    // wait (see PAUSE_REACTION_LEAD_MS's own comment) before the actual
-    // commit.
-    const leadWaitMs = Math.max(0, HLS_SEGMENT_SECONDS * 1000 - PAUSE_REACTION_LEAD_MS);
-    const pauseLandsInMs = (currentInstance && !currentInstance.exited)
-        ? msUntilCurrentSegmentCompletes() + (skipExtraMargin ? 0 : HLS_SEGMENT_SECONDS * 1000) + leadWaitMs
-        : 0;
-
-    res.json({ ok: true, pauseLandsInMs });
-    pauseSpotifyAndEncoder(clientLiveOffsetMs);
+    // Near-trivial now that there's no segment-alignment wait sequence
+    // left to mirror - pauseSpotifyAndEncoder's only real wait is
+    // PAUSE_REACTION_LEAD_MS itself. Still only consumed client-side for
+    // NowPlayingViewModel's position-extrapolation display deadline
+    // (pauseDeadlineElapsedMs), same as before.
+    res.json({ ok: true, pauseLandsInMs: PAUSE_REACTION_LEAD_MS });
+    pauseSpotifyAndEncoder();
 
 }));
 
@@ -4148,7 +3772,6 @@ async function setupStatePush() {
 
 const httpServer = app.listen(PORT, "0.0.0.0", async () => {
     console.log(`Server listening on port ${PORT} (HTTP)`);
-    clearStaleHlsDir();
     await connectSpotify();
     await setupStatePush();
     // matches /pause and /play's own rule: the encoder should only run

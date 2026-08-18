@@ -1,5 +1,5 @@
 import * as api from "./api.js";
-import { syncHlsToPlaybackState, skipToLiveEdge } from "./hlsListen.js";
+import { syncHlsToPlaybackState } from "./hlsListen.js";
 
 export let seeking = false;
 
@@ -61,7 +61,6 @@ let currentAlbumCoverKey = "";
 
 let lastKnownTitle = null;
 let lastKnownPlaying = false;
-let lastSeenAudioReadyGeneration = null;
 
 // Without this, Chrome infers the media notification's behavior from
 // the raw <audio> element instead: it only shows the notification while
@@ -113,18 +112,6 @@ export async function updateState() {
             lastKnownTitle = state.title;
             refreshContextAndQueue();
             updateMediaSessionMetadata(state);
-        }
-
-        // decoupled from the title-change check above on purpose - the
-        // server confirms real audio separately (see /state in
-        // server.js), which can land on a later poll than the one that
-        // first showed the new title. First poll ever just establishes
-        // the baseline instead of firing a jump nothing asked for.
-        if (lastSeenAudioReadyGeneration === null) {
-            lastSeenAudioReadyGeneration = state.audioReadyGeneration;
-        } else if (state.audioReadyGeneration !== lastSeenAudioReadyGeneration) {
-            lastSeenAudioReadyGeneration = state.audioReadyGeneration;
-            skipToLiveEdge();
         }
 
         if (state.cover && state.cover !== currentAlbumCoverKey) {
