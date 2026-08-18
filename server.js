@@ -684,26 +684,42 @@ function parsePositionSeconds(text) {
 // pushes, so a meaningful shortfall (tolerance for scrape-timing noise,
 // not a real threshold) is unambiguous.
 async function pushStateIfChanged() {
-    const state = applyPendingIntent(await scrapeState());
-    const { position, ...dedupFields } = state;
-    const dedupJson = JSON.stringify(dedupFields);
-    const positionSeconds = parsePositionSeconds(position);
-    let wentBackward = false;
-    if (lastPushedPositionSeconds !== null && positionSeconds !== null) {
-        const elapsedSeconds = lastPushedWasPlaying
-            ? (Date.now() - lastPushedPositionAtMs) / 1000
-            : 0;
-        const expectedPositionSeconds = lastPushedPositionSeconds + elapsedSeconds;
-        wentBackward = positionSeconds < expectedPositionSeconds - 2;
-    }
-    if (dedupJson === lastPushedDedupJson && !wentBackward) return;
-    lastPushedDedupJson = dedupJson;
-    lastPushedPositionSeconds = positionSeconds;
-    lastPushedPositionAtMs = Date.now();
-    lastPushedWasPlaying = state.playing;
-    const json = JSON.stringify(state);
-    for (const client of wsClients) {
-        if (client.readyState === WebSocket.OPEN) client.send(json);
+    // scrapeState (and anything downstream of it here) can throw if
+    // Chromium's page navigates mid-scrape (its execution context gets
+    // destroyed) - confirmed live 2026-08-19: an unhandled rejection from
+    // exactly this path (server.log: "Execution context was destroyed,
+    // most likely because of a navigation", inside scrapeState, called
+    // from here) crashed the entire Node process, taking the whole
+    // server down over a single transient page navigation. None of this
+    // function's callers await/catch it (by design - they don't want a
+    // slow scrape to block the route handler that triggered it), so this
+    // is the one shared place that needs to swallow the error: skip this
+    // push, the next real DOM mutation or state-changing action fires
+    // another attempt anyway.
+    try {
+        const state = applyPendingIntent(await scrapeState());
+        const { position, ...dedupFields } = state;
+        const dedupJson = JSON.stringify(dedupFields);
+        const positionSeconds = parsePositionSeconds(position);
+        let wentBackward = false;
+        if (lastPushedPositionSeconds !== null && positionSeconds !== null) {
+            const elapsedSeconds = lastPushedWasPlaying
+                ? (Date.now() - lastPushedPositionAtMs) / 1000
+                : 0;
+            const expectedPositionSeconds = lastPushedPositionSeconds + elapsedSeconds;
+            wentBackward = positionSeconds < expectedPositionSeconds - 2;
+        }
+        if (dedupJson === lastPushedDedupJson && !wentBackward) return;
+        lastPushedDedupJson = dedupJson;
+        lastPushedPositionSeconds = positionSeconds;
+        lastPushedPositionAtMs = Date.now();
+        lastPushedWasPlaying = state.playing;
+        const json = JSON.stringify(state);
+        for (const client of wsClients) {
+            if (client.readyState === WebSocket.OPEN) client.send(json);
+        }
+    } catch (err) {
+        console.error("[pushStateIfChanged] skipped a push after an error:", err.message);
     }
 }
 
