@@ -1,6 +1,8 @@
 package com.jbarnaud.spotifyremote.ui.components
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -8,10 +10,10 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
@@ -45,7 +47,16 @@ private val TopbarBackground = Color(0xFF3A3A3A)
 private val WatermarkGray = Color(0xFF565656)
 private val KeyFace = Color(0xFF161616)
 private val KeyFacePressed = Color(0xFF0D0D0D)
-private val KeyBorder = Color(0xFF3D3D3D)
+private val KeyBorder = Color(0xFF2A2A2A)
+
+// shared by the green fill's own tween AND the typing start delay below
+// - they're deliberately the same duration, not just coincidentally
+private const val FillDurationMs = 3500
+
+// CSS .key/.key.pressed's `transition: transform 0.06s, box-shadow
+// 0.06s, background 0.06s` - the default unspecified easing function
+// is CSS's "ease", cubic-bezier(0.25, 0.1, 0.25, 1)
+private val KeyTransitionEasing = CubicBezierEasing(0.25f, 0.1f, 0.25f, 1f)
 
 private const val TITLE = "spotify remote"
 
@@ -60,7 +71,6 @@ private const val TITLE = "spotify remote"
 // individually "typed" in a repeating cycle for the same duration. The
 // whole thing is one big tap target that browses Home, exactly like the
 // original's topbar.addEventListener("click", browseHome).
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SpotifyRemoteHeader(
     isLoading: Boolean,
@@ -80,7 +90,7 @@ fun SpotifyRemoteHeader(
     val fillFraction by animateFloatAsState(
         targetValue = if (isLoading) 1f else 0f,
         animationSpec = if (isLoading) {
-            tween(durationMillis = 3500, easing = CubicBezierEasing(0.15f, 0.6f, 0.3f, 1f))
+            tween(durationMillis = FillDurationMs, easing = CubicBezierEasing(0.15f, 0.6f, 0.3f, 1f))
         } else {
             tween(durationMillis = 200, easing = CubicBezierEasing(0f, 0f, 0.58f, 1f))
         },
@@ -101,6 +111,13 @@ fun SpotifyRemoteHeader(
     val totalKeys = remember { TITLE.count { it != ' ' } }
     LaunchedEffect(isLoading) {
         if (isLoading) {
+            // deliberate, per the user 2026-08-19: typing only starts
+            // once the green fill has finished its own ramp, not the
+            // moment loading begins - a short load that finishes before
+            // FillDurationMs elapses never shows any typing at all
+            // (this LaunchedEffect gets cancelled by isLoading flipping
+            // back to false, same as it always did), which is intended.
+            delay(FillDurationMs.toLong())
             var i = 0
             while (isActive) {
                 pressedKeyIndex = i % totalKeys
@@ -192,13 +209,26 @@ fun SpotifyRemoteHeader(
 
         var keyIndex = -1
         // CSS: .word { display:inline-block; white-space:nowrap } - each
-        // word never breaks across its own letters, but wraps onto its
-        // own line as a whole once the two words together don't fit a
-        // narrow phone's width (matches FlowRow's default per-item
-        // wrapping exactly)
-        FlowRow(
+        // word never breaks across its own letters, and wraps onto its
+        // own line as a whole - a plain Column of one Row per word
+        // (rather than FlowRow) always renders that same two-line shape
+        // in practice (13 keycaps at 34dp+gaps need a screen far wider
+        // than any phone to fit "spotify remote" on one line, so
+        // FlowRow's single-row case was never actually reachable here
+        // anyway). Switched off FlowRow 2026-08-19: it's built on
+        // SubcomposeLayout, and pressedKeyIndex changing every 90ms
+        // from a plain LaunchedEffect loop wasn't reliably propagating
+        // into the subcomposed KeyCaps below - confirmed live via
+        // logcat (pressedKeyIndex ticking correctly every ~90ms, but
+        // KeyCap only actually recomposing on maybe 1 in 12 of those
+        // ticks, exactly when something UNRELATED - isLoading itself -
+        // also happened to recompose this composable and drag a fresh
+        // value through with it). A plain Column/Row doesn't have
+        // SubcomposeLayout's separate subcomposition-and-explicit-
+        // recompose-propagation step in between, so nothing to miss.
+        Column(
             modifier = Modifier.fillMaxWidth().padding(vertical = 18.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
+            horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             TITLE.split(" ").forEach { word ->
@@ -222,20 +252,39 @@ fun SpotifyRemoteHeader(
 @Composable
 private fun KeyCap(letter: Char, pressed: Boolean) {
 
-    // instant, not animated - the original CSS (.key.pressed) has no
-    // transition at all, a plain snap. animateDpAsState here (~300ms to
-    // settle by default) meant the press motion never had time to
-    // complete before reversing again during the 90ms-per-key typing
-    // cycle - confirmed live: the state itself was cycling correctly
-    // (logcat), the animation lag is what made it invisible.
-    val faceOffset = if (pressed) 4.dp else 0.dp
+    // A previous attempt read the original as an instant snap with no
+    // transition at all and dropped the animation entirely - wrong: the
+    // base .key rule has `transition: transform 0.06s, box-shadow
+    // 0.06s, background 0.06s`, which DOES apply whenever .pressed
+    // toggles. That's why cycling between two near-identical dark grays
+    // with no interpolation, every 90ms, was imperceptible - it needed
+    // real motion, not a bigger color difference. A separate earlier
+    // attempt at animateDpAsState used its ~300ms default spring, which
+    // never had time to settle before the 90ms cycle reversed it again;
+    // this explicit 60ms tween (matching the CSS duration) does.
+    val faceOffset by animateDpAsState(
+        targetValue = if (pressed) 2.dp else 0.dp,
+        animationSpec = tween(durationMillis = 60, easing = KeyTransitionEasing),
+        label = "keyFaceOffset"
+    )
+
+    val faceColor by animateColorAsState(
+        targetValue = if (pressed) KeyFacePressed else KeyFace,
+        animationSpec = tween(durationMillis = 60, easing = KeyTransitionEasing),
+        label = "keyFaceColor"
+    )
 
     Box(modifier = Modifier.size(34.dp)) {
 
+        // box-shadow's `0 2px 0 #000` layer, collapsing to `0 0 0` when
+        // pressed - this box itself stays put at the key's fixed
+        // resting "raised" height; the face animating down to meet it
+        // is what makes the shadow appear to disappear, same effect as
+        // the CSS version shrinking its own box-shadow offset to zero
         Box(
             modifier = Modifier
                 .size(34.dp)
-                .offset(y = 4.dp)
+                .offset(y = 2.dp)
                 .clip(RoundedCornerShape(6.dp))
                 .background(Color.Black)
         )
@@ -245,10 +294,23 @@ private fun KeyCap(letter: Char, pressed: Boolean) {
                 .size(34.dp)
                 .offset(y = faceOffset)
                 .clip(RoundedCornerShape(6.dp))
-                .background(if (pressed) KeyFacePressed else KeyFace)
+                .background(faceColor)
                 .border(1.dp, KeyBorder, RoundedCornerShape(6.dp)),
             contentAlignment = Alignment.Center
         ) {
+
+            // `inset 0 1px 0 rgba(255,255,255,0.05)` - a faint bevel
+            // highlight along the top inner edge, present in both
+            // states (not part of the transition itself, never ported
+            // before at all)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .align(Alignment.TopCenter)
+                    .background(Color.White.copy(alpha = 0.05f))
+            )
+
             Text(
                 text = letter.toString(),
                 color = Color.White,
