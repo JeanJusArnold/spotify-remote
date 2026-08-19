@@ -41,8 +41,13 @@ pactl set-sink-volume spotify-remote-audio 100%
 # automatically targets whatever the current default sink is
 # (spotify-remote-audio here) and remembers that choice - nothing to
 # configure by hand for routing. Install it, then add "Auto Gain" from
-# the Output tab and set: Reference "Integrated", Max History 60s,
-# Target -20dB (a short history reacts too abruptly to track changes).
+# the Output tab and set: Reference "Integrated", Max History 40s,
+# Target -20dB, Silence Threshold -70dB (the EBU R128 standard gate -
+# excludes real silence, e.g. gaps between tracks, from the loudness
+# measurement so Auto Gain doesn't try to boost it up to target; this
+# matters more with a shorter history like 40s, since each excluded-or-
+# not block is a bigger fraction of the window, so a badly-gated silence
+# would skew the running average harder than with a longer history).
 # Settings persist automatically once set.
 #   flatpak install flathub com.github.wwmm.easyeffects
 flatpak run com.github.wwmm.easyeffects &

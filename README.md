@@ -55,10 +55,16 @@ This remote doesn't try to reproduce the full Spotify Web Player experience — 
 ```bash
 git clone <this repo>
 cd spotify-remote
+./setup.sh
+```
+
+`setup.sh` walks through everything below interactively: checking/installing system requirements, creating the virtual audio sink, Tailscale, optionally EasyEffects (with the exact settings to enter), optionally the dedicated-session autostart file, then launching Chromium and the server. It only ever installs something after asking first, and it's safe to re-run — every step checks whether it's already done before acting. The rest of this section is what it automates, kept here for anyone who'd rather do it by hand or understand what the script is doing.
+
+```bash
 npm install
 ```
 
-`openbox-autostart.example` documents a full recommended session setup (virtual audio sink, launching Chromium, and launching the server itself) as a copyable template for a dedicated session running just this project — copy it to `~/.config/openbox/autostart`.
+`openbox-autostart.example` documents a full recommended session setup (virtual audio sink, launching Chromium, and launching the server itself) as a copyable template for a dedicated session running just this project — copy it to `~/.config/openbox/autostart` (or let `setup.sh` generate it for you).
 
 Optionally, [EasyEffects](https://github.com/wwmm/easyeffects) can sit between Chromium and the virtual sink to level out loudness differences between tracks. `openbox-autostart.example` has the details (install command, and the Auto Gain settings this project settled on).
 
