@@ -636,6 +636,7 @@ process.on("SIGINT", () => { stopAllEncoderInstances(); process.exit(); });
 process.on("SIGTERM", () => { stopAllEncoderInstances(); process.exit(); });
 
 let page;
+let cdpSession;
 let controls = {};
 
 // the initial /playlist batch, kept so /playlist-more can pick up where
@@ -671,7 +672,7 @@ async function waitForStableCount(locator, { checks = 3, interval = 400, timeout
 
 async function clickDiscographyChip(chipLabel) {
 
-    return await page.evaluate((label) => {
+    return await evaluateAndClick((label) => {
 
         const shelves = [...document.querySelectorAll('[data-testid="component-shelf"]')];
 
@@ -679,15 +680,12 @@ async function clickDiscographyChip(chipLabel) {
             s.querySelector('[data-testid="rich-title-row-shelf-header"]')?.innerText.startsWith('Discographie')
         );
 
-        if (!discoShelf) return false;
+        if (!discoShelf) return null;
 
         const chip = [...discoShelf.querySelectorAll('[data-encore-id="chip"]')]
             .find(c => c.innerText === label);
 
-        if (!chip) return false;
-
-        chip.click();
-        return true;
+        return chip || null;
 
     }, chipLabel);
 
@@ -793,6 +791,8 @@ async function connectSpotify() {
     // can outnumber or come before the Spotify one, so pick it out by
     // URL instead of assuming it's contexts[0].pages()[0]
     page = pages.find(p => p.url().includes("open.spotify.com")) || pages[0];
+
+    cdpSession = await page.context().newCDPSession(page);
 
     console.log("Connected to Spotify:", await page.title());
 
@@ -1322,36 +1322,148 @@ function scrapeWhatsNewRows() {
 
 // Unlike the library sidebar's virtualized rows, nothing here ever gets
 // removed from the DOM once loaded - it's a plain paginated
-// infinite-scroll: each real scroll near the bottom loads +10 more rows
-// (confirmed: idle waiting alone, or setting scrollTop directly, does
-// NOT trigger it - it needs an actual scroll/wheel event), up to a hard
-// cap (observed 50, but not hardcoded here - just scroll until the
-// count stops growing).
+// infinite-scroll: each real scroll near the bottom loads +10 more rows,
+// up to a hard cap (observed 50, but not hardcoded here - just scroll
+// until the count stops growing).
+//
+// Real keyboard PageDown presses on the feed's own `ul[role="treegrid"]`
+// (focused via ElementHandle.focus() - a genuine CDP focus) instead of
+// page.mouse.wheel() - the old uniform 3000px-every-500ms wheel scroll
+// was suspected of being its own detectable automation signature,
+// separate from the isTrusted click issue fixed elsewhere in this file
+// (a continuous wheel gesture has a physical shape - acceleration,
+// per-device delta, momentum - that's hard to fake convincingly; a
+// PageDown keystroke is a discrete action with no such shape to get
+// wrong). Confirmed live (2026-08-19, clean unblocked session) that
+// PageDown does work here, but each press only moves the treegrid by
+// a modest amount - the row count can plateau for 2-3 consecutive
+// presses before crossing the next +10 threshold, unlike the old giant
+// wheel jump which crossed a threshold almost every tick. So, same as
+// scrollToFindAndClick's tracklist scan, termination is judged by
+// scrollTop no longer moving (the real bottom), not by the row count
+// happening to be unchanged on any single press - breaking on that
+// would stop early, mid-list.
+// the feed's first batch (10 rows) is already in the DOM as soon as the
+// page itself is - no scrolling needed, unlike scrapeAllWhatsNewRows'
+// remaining ~40 rows. Split out so /whats-new can return quickly
+// instead of always paying the full multi-second scroll-scan up front.
+async function waitForWhatsNewFeedReady() {
+    const rowLocator = page.locator('[data-testid="infinite-scroll-list"] li[role="row"]');
+    await rowLocator.first().waitFor({ timeout: 8000 });
+    return rowLocator;
+}
+
+// same trick as positionTracklistAfterInitialBatch (playlists) - a
+// plain scrollTop write, not a real scroll/wheel gesture, so it doesn't
+// itself trigger Spotify's own lazy-load (confirmed elsewhere in this
+// file: setting scrollTop directly never does). Jumps straight past the
+// rows already sent in the first batch, so /whats-new-more's PageDown
+// scan starts from there instead of re-covering ground already shown.
+async function positionWhatsNewAfterInitialBatch(rowCount) {
+
+    return await page.evaluate((rowCount) => {
+
+        function findScrollable(el) {
+            while (el && el !== document.body) {
+                const style = getComputedStyle(el);
+                if ((style.overflowY === "auto" || style.overflowY === "scroll") && el.scrollHeight > el.clientHeight) {
+                    return el;
+                }
+                el = el.parentElement;
+            }
+            return null;
+        }
+
+        const row = document.querySelector('[data-testid="infinite-scroll-list"] li[role="row"]');
+        const container = row ? findScrollable(row) : null;
+
+        if (!container || !row) return false;
+
+        const rowHeight = row.getBoundingClientRect().height;
+        const totalRange = container.scrollHeight - container.clientHeight;
+
+        container.scrollTop = Math.min(rowCount * rowHeight, totalRange);
+
+        return true;
+
+    }, rowCount);
+
+}
+
 async function scrapeAllWhatsNewRows() {
 
-    const rowLocator = page.locator('[data-testid="infinite-scroll-list"] li[role="row"]');
+    await waitForWhatsNewFeedReady();
 
-    await rowLocator.first().waitFor({ timeout: 8000 });
+    await page.locator('ul[role="treegrid"]').first().focus().catch(() => {});
 
-    const box = await page.locator('[data-testid="infinite-scroll-list"]').boundingBox();
-    if (box) await page.mouse.move(box.x + box.width / 2, box.y + 50);
+    const getScrollTop = () => page.evaluate(() => {
+        function findScrollable(el) {
+            while (el && el !== document.body) {
+                const style = getComputedStyle(el);
+                if ((style.overflowY === "auto" || style.overflowY === "scroll") && el.scrollHeight > el.clientHeight) {
+                    return el;
+                }
+                el = el.parentElement;
+            }
+            return null;
+        }
+        const list = document.querySelector('[data-testid="infinite-scroll-list"]');
+        const container = list ? findScrollable(list) : null;
+        return container ? container.scrollTop : null;
+    });
 
-    let lastCount = await rowLocator.count();
+    let lastScrollTop = await getScrollTop();
 
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 40; i++) {
 
-        await page.mouse.wheel(0, 3000);
-        await page.waitForTimeout(500);
+        await page.keyboard.press("PageDown");
+        await page.waitForTimeout(400);
 
-        const count = await rowLocator.count();
+        const scrollTop = await getScrollTop();
 
-        if (count === lastCount) break;
+        if (scrollTop === lastScrollTop) break;
 
-        lastCount = count;
+        lastScrollTop = scrollTop;
 
     }
 
     return await scrapeWhatsNewRows();
+
+}
+
+// same "not in the DOM yet" problem as the artist discography grid and
+// library sidebar, but scoped to the Nouveautés content feed - the app
+// can cache a full 50-item scrape client-side and show it instantly on
+// return instead of re-running scrapeAllWhatsNewRows (see /browser-back),
+// but the real feed itself resets to just its first 10-row batch on a
+// fresh visit, so a tap on anything beyond that isn't clickable yet.
+// Self-guards on the missing list the same way the other two do -
+// harmless to try even when the tap actually came from elsewhere.
+async function scrollWhatsNewAndRetryClick(clickFn, direction) {
+
+    const hasFeed = await page.evaluate(() => !!document.querySelector('[data-testid="infinite-scroll-list"]'));
+    if (!hasFeed) return false;
+
+    return pageStepUntilFound(async () => {
+        return await page.locator('ul[role="treegrid"]').first().focus()
+            .then(() => true).catch(() => false);
+    }, clickFn, direction, async () => {
+        return await page.evaluate(() => {
+            function findScrollable(el) {
+                while (el && el !== document.body) {
+                    const style = getComputedStyle(el);
+                    if ((style.overflowY === "auto" || style.overflowY === "scroll") && el.scrollHeight > el.clientHeight) {
+                        return el;
+                    }
+                    el = el.parentElement;
+                }
+                return null;
+            }
+            const list = document.querySelector('[data-testid="infinite-scroll-list"]');
+            const container = list ? findScrollable(list) : null;
+            return container ? container.scrollTop : null;
+        });
+    });
 
 }
 
@@ -1361,6 +1473,11 @@ async function scrapeAllWhatsNewRows() {
 // The "Musique" tab is Spotify's default here, so only album/track/
 // artist/playlist links show up - podcast episodes (a separate tab)
 // aren't covered yet, same as /search already only handles those types.
+// Returns just the first batch (fast, no scrolling) rather than the
+// full ~50-item scan - the client shows this immediately with a
+// "Charger plus" button (see /whats-new-more) instead of blocking on
+// the multi-second scroll-scan every single visit, per the user's
+// request 2026-08-19.
 app.get("/whats-new", async (req, res) => {
 
     try {
@@ -1371,13 +1488,44 @@ app.get("/whats-new", async (req, res) => {
             await page.click('[data-testid="whats-new-feed-button"]');
         }
 
-        const results = await scrapeAllWhatsNewRows();
+        await waitForWhatsNewFeedReady();
+
+        const results = await scrapeWhatsNewRows();
 
         res.json(results);
+
+        // purely prepares the next "Charger plus" call - the remote
+        // already has its answer, this shouldn't delay it. Only bother
+        // if there's plausibly more to reveal (a full batch came back);
+        // response is already sent, so failures here are just logged.
+        if (results.length >= 10) {
+            try {
+                await positionWhatsNewAfterInitialBatch(results.length);
+            } catch (e) {
+                console.error("positionWhatsNewAfterInitialBatch failed:", e);
+            }
+        }
 
     } catch (e) {
         console.error(e);
         res.status(500).send("whats-new error");
+    }
+
+});
+
+// "Charger plus" - runs the full scroll-scan and returns everything,
+// same one-shot "reveal the rest" shape as /playlist-more and
+// /library-more (not true incremental paging - a single tap here gets
+// the whole remaining list at once).
+app.get("/whats-new-more", async (req, res) => {
+
+    try {
+
+        res.json(await scrapeAllWhatsNewRows());
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).send("whats-new-more error");
     }
 
 });
@@ -1409,7 +1557,7 @@ async function tryClickPlayableElement(id) {
 
     }
 
-    return await page.evaluate((id) => {
+    const rowAlreadyPlaying = await page.evaluate((id) => {
 
         const link = document.querySelector(`a[href*="/${id}"]`)
             || document.querySelector(`[aria-labelledby*="${id}"]`);
@@ -1422,17 +1570,6 @@ async function tryClickPlayableElement(id) {
 
             const buttons = [...ancestor.querySelectorAll('button')];
 
-            const playBtn = buttons.find(b =>
-                b.getAttribute('data-testid') === 'play-button' ||
-                b.getAttribute('aria-label')?.startsWith('Lire') ||
-                b.getAttribute('aria-label') === 'Lecture'
-            );
-
-            if (playBtn) {
-                playBtn.click();
-                return true;
-            }
-
             // a Pause button this close to the link means this row IS
             // already the currently playing track; stop here instead of
             // climbing further and grabbing an unrelated row's button
@@ -1443,11 +1580,46 @@ async function tryClickPlayableElement(id) {
 
             if (pauseBtn) return true;
 
+            if (buttons.some(b =>
+                b.getAttribute('data-testid') === 'play-button' ||
+                b.getAttribute('aria-label')?.startsWith('Lire') ||
+                b.getAttribute('aria-label') === 'Lecture'
+            )) return false;
+
             ancestor = ancestor.parentElement;
 
         }
 
         return false;
+
+    }, id);
+
+    if (rowAlreadyPlaying) return true;
+
+    return await evaluateAndClick((id) => {
+
+        const link = document.querySelector(`a[href*="/${id}"]`)
+            || document.querySelector(`[aria-labelledby*="${id}"]`);
+
+        if (!link) return null;
+
+        let ancestor = link;
+
+        for (let d = 0; d < 6 && ancestor; d++) {
+
+            const playBtn = [...ancestor.querySelectorAll('button')].find(b =>
+                b.getAttribute('data-testid') === 'play-button' ||
+                b.getAttribute('aria-label')?.startsWith('Lire') ||
+                b.getAttribute('aria-label') === 'Lecture'
+            );
+
+            if (playBtn) return playBtn;
+
+            ancestor = ancestor.parentElement;
+
+        }
+
+        return null;
 
     }, id);
 
@@ -1460,12 +1632,12 @@ async function tryClickPlayableElement(id) {
 // elsewhere in this file (see the README's language dependency note)
 async function tryAddToQueue(id) {
 
-    const opened = await page.evaluate((id) => {
+    const opened = await evaluateAndClick((id) => {
 
         const link = document.querySelector(`a[href*="/${id}"]`)
             || document.querySelector(`[aria-labelledby*="${id}"]`);
 
-        if (!link) return false;
+        if (!link) return null;
 
         let ancestor = link;
 
@@ -1475,16 +1647,13 @@ async function tryAddToQueue(id) {
                 b.getAttribute('data-testid') === 'more-button'
             );
 
-            if (moreBtn) {
-                moreBtn.click();
-                return true;
-            }
+            if (moreBtn) return moreBtn;
 
             ancestor = ancestor.parentElement;
 
         }
 
-        return false;
+        return null;
 
     }, id);
 
@@ -1501,19 +1670,16 @@ async function tryAddToQueue(id) {
             ?.querySelectorAll('li[role="row"]').length ?? null
     );
 
-    const clicked = await page.evaluate(() => {
+    const clicked = await evaluateAndClick(() => {
 
         const menu = document.querySelector('[role="menu"]');
-        if (!menu) return false;
+        if (!menu) return null;
 
         const item = [...menu.querySelectorAll('[role="menuitem"]')].find(i =>
             i.innerText.trim() === "Ajouter à la file d'attente"
         );
 
-        if (!item) return false;
-
-        item.click();
-        return true;
+        return item || null;
 
     });
 
@@ -1675,6 +1841,64 @@ async function pageStepUntilFound(focusFn, clickFn, direction, getScrollTop) {
 
 }
 
+// Simulates the mouse "back" (thumb) button most mice have, via a raw
+// CDP Input.dispatchMouseEvent (button: "back") rather than Playwright's
+// page.goBack()/reload() history APIs - those are programmatic
+// navigation calls, not real input, and page.reload() specifically was
+// confirmed live 2026-08-19 to trigger a much more severe Spotify
+// anti-automation lockdown than any click. A back-button mouse click is
+// real trusted input the same way page.mouse.click() is, using
+// browser-native back-navigation semantics instead of a CDP navigation
+// primitive - the user's own suggestion after the reload incident.
+// Coordinates don't matter (this isn't a click on page content), just
+// need to be inside the viewport.
+async function browserBackClick() {
+    await cdpSession.send("Input.dispatchMouseEvent", {
+        type: "mousePressed", x: 10, y: 10, button: "back", buttons: 8, clickCount: 1
+    });
+    await cdpSession.send("Input.dispatchMouseEvent", {
+        type: "mouseReleased", x: 10, y: 10, button: "back", buttons: 0, clickCount: 1
+    });
+}
+
+// Real CDP-dispatched click (isTrusted: true) at an element's center -
+// confirmed live 2026-08-19 that Spotify flags/restricts the session
+// after enough JS-synthetic (isTrusted: false) clicks (repeat/shuffle
+// got disabled, new tracks stopped playing; a real mouse click
+// recovered it instantly). Deliberately skips Playwright's full
+// actionability engine (visibility/stability polling, hit-test) for
+// latency, keeping only scrollIntoViewIfNeeded - confirmed live that
+// boundingBox()/isVisible() alone are NOT enough: a row further down a
+// tall list still reports a "visible" non-zero box even when it's
+// below the actual viewport (e.g. y=1180 against a 992px-tall window),
+// so page.mouse.click() at that box silently clicked empty page space
+// (elementFromPoint at those coordinates returned nothing). If a
+// specific call site also needs the hit-test (risk of clicking
+// whatever else is topmost at these coordinates), switch that site to
+// a full ElementHandle.click() instead - see scrollToFindAndClick's
+// focusFn for the existing example.
+async function clickHandle(handle) {
+    await handle.scrollIntoViewIfNeeded().catch(() => {});
+    const box = await handle.boundingBox();
+    if (!box) return false;
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    return true;
+}
+
+// page.evaluateHandle + clickHandle + dispose, bundled - the find-and-
+// click callback returns the target element (or null/undefined)
+// instead of clicking it itself, mirroring every existing
+// page.evaluate(...) callback's shape almost exactly (swap
+// `el.click(); return true` for `return el`).
+async function evaluateAndClick(fn, ...args) {
+    const handle = await page.evaluateHandle(fn, ...args);
+    const el = handle.asElement();
+    if (!el) { await handle.dispose(); return false; }
+    const clicked = await clickHandle(el);
+    await handle.dispose();
+    return clicked;
+}
+
 // the client already knows roughly where the tapped track sits
 // relative to the center position "Charger plus" leaves the cursor
 // at, so it tells us which way to look. Clicking the column header
@@ -1745,6 +1969,10 @@ app.get("/play-result", requiresMprisUnblocked(async (req, res) => {
 
         if (!clicked) {
             clicked = await scrollToFindAndClick(() => tryClickPlayableElement(id), direction);
+        }
+
+        if (!clicked) {
+            clicked = await scrollWhatsNewAndRetryClick(() => tryClickPlayableElement(id), direction);
         }
 
         if (!clicked) {
@@ -2168,41 +2396,47 @@ function categorizeReleases(releases) {
 
 async function scrapeArtistDiscography(onFirstRender) {
 
-    await page.waitForSelector('[data-testid="component-shelf"]', { timeout: 8000 });
+    // browser-back (see /browser-back) can land here already sitting on
+    // the discography/all sub-page from a previous visit - the shelf
+    // this function otherwise clicks through to reach that page doesn't
+    // exist there, so re-running those steps would just time out
+    // waiting for it. Skip straight to the grid wait in that case.
+    if (!page.url().includes("/discography/")) {
 
-    const seeAllClicked = await page.evaluate(() => {
-        const shelves = [...document.querySelectorAll('[data-testid="component-shelf"]')];
-        const discoShelf = shelves.find(s =>
-            s.querySelector('[data-testid="rich-title-row-shelf-header"]')?.innerText.startsWith('Discographie')
+        await page.waitForSelector('[data-testid="component-shelf"]', { timeout: 8000 });
+
+        const seeAllClicked = await evaluateAndClick(() => {
+            const shelves = [...document.querySelectorAll('[data-testid="component-shelf"]')];
+            const discoShelf = shelves.find(s =>
+                s.querySelector('[data-testid="rich-title-row-shelf-header"]')?.innerText.startsWith('Discographie')
+            );
+            return discoShelf?.querySelector('[data-testid="see-all-link"]') || null;
+        });
+
+        if (!seeAllClicked) {
+            throw new Error("discography not found");
+        }
+
+        await page.waitForSelector(
+            '[data-testid="artist-page"] button[aria-controls="sort-and-view-picker"]',
+            { timeout: 8000 }
         );
-        const seeAll = discoShelf?.querySelector('[data-testid="see-all-link"]');
-        if (!seeAll) return false;
-        seeAll.click();
-        return true;
-    });
 
-    if (!seeAllClicked) {
-        throw new Error("discography not found");
+        await page.locator(
+            '[data-testid="artist-page"] button[aria-controls="sort-and-view-picker"]'
+        ).click();
+
+        await page.waitForTimeout(400);
+
+        await evaluateAndClick(() => {
+            const menus = [...document.querySelectorAll('[role="menu"]')];
+            const viewMenu = menus.find(m => m.innerText.includes("Mode d'affichage"));
+            const btn = [...(viewMenu?.querySelectorAll('button, [role="menuitemradio"]') || [])]
+                .find(o => o.innerText.trim() === 'Grille');
+            return btn || null;
+        });
+
     }
-
-    await page.waitForSelector(
-        '[data-testid="artist-page"] button[aria-controls="sort-and-view-picker"]',
-        { timeout: 8000 }
-    );
-
-    await page.locator(
-        '[data-testid="artist-page"] button[aria-controls="sort-and-view-picker"]'
-    ).click();
-
-    await page.waitForTimeout(400);
-
-    await page.evaluate(() => {
-        const menus = [...document.querySelectorAll('[role="menu"]')];
-        const viewMenu = menus.find(m => m.innerText.includes("Mode d'affichage"));
-        const btn = [...(viewMenu?.querySelectorAll('button, [role="menuitemradio"]') || [])]
-            .find(o => o.innerText.trim() === 'Grille');
-        btn?.click();
-    });
 
     await page.waitForSelector('[data-encore-id="card"]', { timeout: 8000 });
     await page.waitForTimeout(1000);
@@ -2239,11 +2473,11 @@ async function scrapeArtistDiscography(onFirstRender) {
         }
 
         if (await isRightPanelOnScreen()) {
-            await page.evaluate(() => {
+            await evaluateAndClick(() => {
                 const btn = [...document.querySelectorAll('button')].find(b =>
                     (b.getAttribute('aria-label') || "").includes('Masquer la vue')
                 );
-                btn?.click();
+                return btn || null;
             });
             await page.waitForTimeout(500);
         }
@@ -2288,6 +2522,10 @@ app.get("/artist", async (req, res) => {
         }
 
         if (!navigated) {
+            navigated = await scrollWhatsNewAndRetryClick(() => tryClickAnywhere(id), direction);
+        }
+
+        if (!navigated) {
             return res.status(404).send("not found");
         }
 
@@ -2325,16 +2563,14 @@ app.get("/current-artist", async (req, res) => {
 
     try {
 
-        const navigated = await page.evaluate(() => {
+        const navigated = await evaluateAndClick(() => {
             const container = document.querySelector(
                 '[data-testid="context-item-info-artist"]'
             );
             const link = container?.matches('a[href*="/artist/"]')
                 ? container
                 : container?.querySelector('a[href*="/artist/"]');
-            if (!link) return false;
-            link.click();
-            return true;
+            return link || null;
         });
 
         if (!navigated) {
@@ -2371,11 +2607,8 @@ app.get("/current-artist", async (req, res) => {
 
 async function navigateToCurrentAlbum() {
 
-    return await page.evaluate(() => {
-        const contextLink = document.querySelector('[data-testid="context-item-link"]');
-        if (!contextLink) return false;
-        contextLink.click();
-        return true;
+    return await evaluateAndClick(() => {
+        return document.querySelector('[data-testid="context-item-link"]');
     });
 
 }
@@ -2429,12 +2662,9 @@ app.get("/current-album", async (req, res) => {
 
 async function navigateHome() {
 
-    return await page.evaluate(() => {
-        const home = document.querySelector('[data-testid="home-button"]')
+    return await evaluateAndClick(() => {
+        return document.querySelector('[data-testid="home-button"]')
             || document.querySelector('a[href="/"]');
-        if (!home) return false;
-        home.click();
-        return true;
     });
 
 }
@@ -2757,6 +2987,10 @@ app.get("/album", async (req, res) => {
         }
 
         if (!navigated) {
+            navigated = await scrollWhatsNewAndRetryClick(() => tryClickAnywhere(id), direction);
+        }
+
+        if (!navigated) {
             return res.status(404).send("not found");
         }
 
@@ -2788,37 +3022,38 @@ async function selectLibraryChip(type) {
     });
 
     if (inFolder) {
-        await page.evaluate(() => {
+        await evaluateAndClick(() => {
             const lib = document.querySelector('[class*="YourLibraryX"]');
-            const back = [...(lib?.querySelectorAll("button") || [])].find(b => b.getAttribute("aria-label") === "Retour");
-            back?.click();
+            return [...(lib?.querySelectorAll("button") || [])].find(b => b.getAttribute("aria-label") === "Retour") || null;
         });
         await page.waitForTimeout(600);
     }
 
     async function clickChip() {
-        return await page.evaluate((label) => {
+        const handle = await page.evaluateHandle((label) => {
             const lib = document.querySelector('[class*="YourLibraryX"]');
-            const chip = lib
-                ? [...lib.querySelectorAll('[data-encore-id="chip"]')].find(c => c.getAttribute("aria-label") === label)
+            return lib
+                ? [...lib.querySelectorAll('[data-encore-id="chip"]')].find(c => c.getAttribute("aria-label") === label) || null
                 : null;
-            if (!chip) return false;
-            // clicking an already-active chip toggles it back off
-            if (chip.getAttribute("aria-checked") !== "true") chip.click();
-            return true;
         }, label);
+        const chip = handle.asElement();
+        if (!chip) { await handle.dispose(); return false; }
+        // clicking an already-active chip toggles it back off
+        const alreadyActive = await chip.evaluate(el => el.getAttribute("aria-checked") === "true");
+        if (!alreadyActive) await clickHandle(chip);
+        await handle.dispose();
+        return true;
     }
 
     if (await clickChip()) return true;
 
     // the chip row collapses to just the active filter once one is
     // selected; deselect it first to bring the full chip row back
-    await page.evaluate(() => {
+    await evaluateAndClick(() => {
         const lib = document.querySelector('[class*="YourLibraryX"]');
-        const active = lib
-            ? [...lib.querySelectorAll('[data-encore-id="chip"]')].find(c => c.getAttribute("aria-checked") === "true")
+        return lib
+            ? [...lib.querySelectorAll('[data-encore-id="chip"]')].find(c => c.getAttribute("aria-checked") === "true") || null
             : null;
-        active?.click();
     });
 
     await page.waitForTimeout(600);
@@ -2860,15 +3095,10 @@ async function tryClickAnywhere(id) {
     // we're already there
     if (page.url().includes(`/${id}`)) return true;
 
-    return await page.evaluate((id) => {
+    return await evaluateAndClick((id) => {
 
-        const target = document.querySelector(`a[href*="/${id}"]`)
+        return document.querySelector(`a[href*="/${id}"]`)
             || document.querySelector(`[role="button"][aria-labelledby*="${id}"]`);
-
-        if (!target) return false;
-
-        target.click();
-        return true;
 
     }, id);
 
@@ -3141,6 +3371,10 @@ app.get("/playlist", async (req, res) => {
         }
 
         if (!navigated) {
+            navigated = await scrollWhatsNewAndRetryClick(() => tryClickAnywhere(id), direction);
+        }
+
+        if (!navigated) {
             return res.status(404).send("not found");
         }
 
@@ -3401,11 +3635,11 @@ app.get("/library-more", async (req, res) => {
 // contents then use the "Retour" button to back out
 async function tryClickFolder(id) {
 
-    return await page.evaluate((id) => {
+    return await evaluateAndClick((id) => {
 
         const lib = document.querySelector('[class*="YourLibraryX"]');
 
-        if (!lib) return false;
+        if (!lib) return null;
 
         const rows = [...lib.querySelectorAll('[role="row"]')];
 
@@ -3414,12 +3648,7 @@ async function tryClickFolder(id) {
             return labelledBy.endsWith("folder:" + id);
         });
 
-        const clickTarget = folderRow?.querySelector('[role="button"]');
-
-        if (!clickTarget) return false;
-
-        clickTarget.click();
-        return true;
+        return folderRow?.querySelector('[role="button"]') || null;
 
     }, id);
 
@@ -3464,6 +3693,37 @@ app.get("/library-folder", async (req, res) => {
 
 });
 
+// The Android app's own back navigation (BrowseScreen/SearchScreen) only
+// updates its local nav stack - the underlying Spotify page never moved,
+// so it stays on whatever the user last tapped into (e.g. an album)
+// while the app shows a previous screen (e.g. the artist behind it).
+// Every subsequent action then 404s, since it searches the CURRENT
+// (wrong) page's DOM for elements that only exist on the page the app
+// thinks it's showing. Confirmed live 2026-08-19, including reproducing
+// it directly: firing this album request concurrently with the previous
+// screen's own re-fetch left the real page stuck on the album while the
+// artist request 404'd.
+//
+// Fix: the client calls this route BEFORE popping its own back stack,
+// so the real page is already back where the resuming screen expects by
+// the time that screen's own onResumed()-triggered re-fetch runs (which
+// reuses the ordinary forward-navigation route for that target - most
+// of those already no-op their own click step when the page turns out
+// to already be on the right entity, e.g. tryClickAnywhere's `if
+// (page.url().includes(...)) return true`).
+app.get("/browser-back", async (req, res) => {
+
+    try {
+        await browserBackClick();
+        await page.waitForTimeout(400);
+        res.json({ ok: true });
+    } catch (e) {
+        console.error(e);
+        res.status(500).send("browser-back error");
+    }
+
+});
+
 // the sidebar keeps its own navigation state independent of whatever
 // the main content pane is showing (confirmed: browsing into a
 // playlist from inside a folder doesn't close the folder in the
@@ -3477,12 +3737,9 @@ app.get("/library-back", async (req, res) => {
     try {
 
         if (exitFolder) {
-            const clicked = await page.evaluate(() => {
+            const clicked = await evaluateAndClick(() => {
                 const lib = document.querySelector('[class*="YourLibraryX"]');
-                const back = [...(lib?.querySelectorAll("button") || [])].find(b => b.getAttribute("aria-label") === "Retour");
-                if (!back) return false;
-                back.click();
-                return true;
+                return [...(lib?.querySelectorAll("button") || [])].find(b => b.getAttribute("aria-label") === "Retour") || null;
             });
             if (clicked) {
                 await page.waitForTimeout(500);
@@ -3555,10 +3812,10 @@ app.get("/queue-play", requiresMprisUnblocked(async (req, res) => {
             ? 'ul[aria-label="À suivre dans la file d\'attente"]'
             : 'ul[aria-label="À suivre"]';
 
-        const clicked = await page.evaluate(({ selector, index, expectedTitle, expectedSubtitle }) => {
+        const clicked = await evaluateAndClick(({ selector, index, expectedTitle, expectedSubtitle }) => {
 
             const list = document.querySelector(selector);
-            if (!list) return false;
+            if (!list) return null;
 
             const rows = [...list.querySelectorAll('li[role="row"]')];
 
@@ -3594,14 +3851,9 @@ app.get("/queue-play", requiresMprisUnblocked(async (req, res) => {
                 }
             }
 
-            if (!target) return false;
+            if (!target) return null;
 
-            const btn = target.querySelector('[data-testid="play-button"]');
-
-            if (!btn) return false;
-
-            btn.click();
-            return true;
+            return target.querySelector('[data-testid="play-button"]');
 
         }, { selector, index, expectedTitle, expectedSubtitle });
 
@@ -3645,19 +3897,15 @@ app.get("/queue-remove", async (req, res) => {
             return list ? list.querySelectorAll('li[role="row"]').length : 0;
         }, selector);
 
-        const opened = await page.evaluate(({ selector, index }) => {
+        const opened = await evaluateAndClick(({ selector, index }) => {
 
             const list = document.querySelector(selector);
-            if (!list) return false;
+            if (!list) return null;
 
             const row = list.querySelectorAll('li[role="row"]')[index];
-            if (!row) return false;
+            if (!row) return null;
 
-            const btn = row.querySelector('[data-testid="more-button"]');
-            if (!btn) return false;
-
-            btn.click();
-            return true;
+            return row.querySelector('[data-testid="more-button"]');
 
         }, { selector, index });
 
@@ -3667,19 +3915,14 @@ app.get("/queue-remove", async (req, res) => {
 
         await page.waitForSelector('[role="menu"]', { timeout: 3000 }).catch(() => {});
 
-        const clicked = await page.evaluate(() => {
+        const clicked = await evaluateAndClick(() => {
 
             const menu = document.querySelector('[role="menu"]');
-            if (!menu) return false;
+            if (!menu) return null;
 
-            const item = [...menu.querySelectorAll('[role="menuitem"]')].find(i =>
+            return [...menu.querySelectorAll('[role="menuitem"]')].find(i =>
                 i.innerText.trim() === "Supprimer de la file d'attente"
-            );
-
-            if (!item) return false;
-
-            item.click();
-            return true;
+            ) || null;
 
         });
 
