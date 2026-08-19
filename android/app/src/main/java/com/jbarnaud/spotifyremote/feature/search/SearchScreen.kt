@@ -1,5 +1,6 @@
 package com.jbarnaud.spotifyremote.feature.search
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -313,6 +314,12 @@ fun SearchResultsScreen(
 
     val uiState by viewModel.uiState.collectAsState()
 
+    // see BrowseScreen's own BackHandler comment - Navigation-Compose
+    // handles the system back gesture itself by default, bypassing
+    // onBack entirely, so this intercepts it to go through the same
+    // server-resync as the visible arrow below
+    BackHandler(enabled = showBackButton) { viewModel.goBack(onBack) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -325,7 +332,7 @@ fun SearchResultsScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(
-                onClick = onBack,
+                onClick = { viewModel.goBack(onBack) },
                 enabled = showBackButton,
                 modifier = Modifier.alpha(if (showBackButton) 1f else 0f)
             ) {

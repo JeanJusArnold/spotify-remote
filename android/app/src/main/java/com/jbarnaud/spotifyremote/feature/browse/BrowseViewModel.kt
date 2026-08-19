@@ -120,6 +120,15 @@ class BrowseViewModel @Inject constructor(
     // libraryFullCache
     private var libraryFullScan: List<BrowseItem>? = null
 
+    // last full /whats-new scrape (~50 items, several seconds to
+    // produce - see scrapeAllWhatsNewRows). Shown instantly on a return
+    // visit instead of re-running that scrape, since the real feed
+    // itself resets to just its first 10-row batch on every fresh visit
+    // - a tap on anything beyond that is handled server-side on demand
+    // by scrollWhatsNewAndRetryClick instead, not by pre-emptively
+    // re-fetching everything here.
+    private var whatsNewFullScan: List<BrowseItem>? = null
+
     init {
         load()
     }
@@ -129,6 +138,28 @@ class BrowseViewModel @Inject constructor(
     // harmless) and every time this screen is returned to via back
     fun onResumed() {
         if (hasLoadedOnce) load()
+    }
+
+    // Both the back-arrow tap and the system back gesture route through
+    // this instead of calling onBack directly - the underlying Spotify
+    // page never moved on its own just because this app's nav stack
+    // popped, so without this it stayed wherever the user last tapped
+    // into (e.g. an album), while the screen being returned to (e.g. its
+    // artist) re-fetches via onResumed() and gets a 404/stale scrape
+    // once every subsequent action searches the wrong page's DOM.
+    // Library/LibraryFolder are excluded - their own back path
+    // (apiService.libraryBack, fired from their own load()) already
+    // drives the sidebar's real "Retour" button server-side; the
+    // library sidebar's navigation isn't real browser URL history the
+    // way artist/album/playlist pages are, so a browser-back click
+    // wouldn't apply there and could conflict with it.
+    fun goBack(onBack: () -> Unit) {
+        viewModelScope.launch {
+            if (target !is BrowseTarget.Library && target !is BrowseTarget.LibraryFolder) {
+                runCatching { apiService.browserBack() }
+            }
+            onBack()
+        }
     }
 
     fun onItemClick(item: BrowseItem, onNavigate: (BrowseTarget) -> Unit, onPlayed: () -> Unit) {
@@ -168,7 +199,8 @@ class BrowseViewModel @Inject constructor(
 
     fun loadMore() {
         val current = target
-        if (current !is BrowseTarget.Playlist && current !is BrowseTarget.Library) return
+        if (current !is BrowseTarget.Playlist && current !is BrowseTarget.Library &&
+            current !is BrowseTarget.WhatsNew) return
         if (_uiState.value.isLoadingMore) return
 
         _uiState.update { it.copy(isLoadingMore = true) }
@@ -188,6 +220,11 @@ class BrowseViewModel @Inject constructor(
                             ).lastChunk()
                             libraryFullScan = chunk.tracks
                             setPaginated(chunk.tracks, canLoadMore = false)
+                        }
+                        BrowseTarget.WhatsNew -> {
+                            val items = apiService.whatsNewMore()
+                            whatsNewFullScan = items
+                            setPaginated(items, canLoadMore = false)
                         }
                         else -> Unit
                     }
@@ -250,7 +287,22 @@ class BrowseViewModel @Inject constructor(
                     when (val current = target) {
 
                         BrowseTarget.Home -> setSections(apiService.home())
-                        BrowseTarget.WhatsNew -> setFlatItems(apiService.whatsNew())
+                        BrowseTarget.WhatsNew -> {
+                            // whatsNewFullScan is only ever set once
+                            // loadMore() has actually run (see below) -
+                            // same "only meaningful once the full scan
+                            // happened" shape as Library's own cache.
+                            // Until then, every visit re-fetches just
+                            // the fast first batch (cheap enough - see
+                            // /whats-new - not worth caching a partial
+                            // result).
+                            val cached = whatsNewFullScan
+                            if (cached != null) {
+                                setPaginated(cached, canLoadMore = false)
+                            } else {
+                                setPaginated(apiService.whatsNew(), canLoadMore = true)
+                            }
+                        }
 
                         // matches browseArtist/browseCurrentArtist's own
                         // "shown" flag exactly - the original stops the

@@ -1,5 +1,6 @@
 package com.jbarnaud.spotifyremote.feature.browse
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -64,6 +65,13 @@ fun BrowseScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // Navigation-Compose handles the system back gesture/button itself
+    // by default (calling popBackStack() directly, bypassing onBack
+    // entirely) - this intercepts it so it goes through the same
+    // server-resync as the visible arrow below. See goBack's own
+    // comment for why that resync matters.
+    BackHandler(enabled = showBackButton) { viewModel.goBack(onBack) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -84,7 +92,7 @@ fun BrowseScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(
-                onClick = onBack,
+                onClick = { viewModel.goBack(onBack) },
                 enabled = showBackButton,
                 modifier = Modifier.alpha(if (showBackButton) 1f else 0f)
             ) {

@@ -51,8 +51,13 @@ interface ApiService {
     @GET("/search")
     suspend fun search(@Query("q") query: String): List<BrowseItem>
 
+    // fast, first-batch-only (see /whats-new-more for the rest) -
+    // BrowseViewModel.loadMore's WhatsNew case
     @GET("/whats-new")
     suspend fun whatsNew(): List<BrowseItem>
+
+    @GET("/whats-new-more")
+    suspend fun whatsNewMore(): List<BrowseItem>
 
     // direction hints (getDirectionHint in the web client, used for the
     // server's scroll-and-retry fallback on a virtualized-list tap miss)
@@ -93,6 +98,16 @@ interface ApiService {
     // independent of what this app's back stack shows).
     @GET("/library-back")
     suspend fun libraryBack(@Query("exitFolder") exitFolder: Int? = null): List<BrowseItem>
+
+    // clicks the mouse "back" (thumb) button via a real CDP input event
+    // server-side, so the underlying Spotify page's own browser history
+    // actually moves back in sync with this app's local nav-stack pop -
+    // without this, the app's back button only changed local UI state
+    // and the real page stayed wherever the user last tapped into,
+    // breaking every subsequent action until something forced a resync.
+    // Called BEFORE popping the back stack - see BrowseViewModel.goBack.
+    @GET("/browser-back")
+    suspend fun browserBack(): Response<Unit>
 
     // reads the webplayer's own queue panel - only meaningful once the
     // panel's been opened server-side, which this endpoint does itself

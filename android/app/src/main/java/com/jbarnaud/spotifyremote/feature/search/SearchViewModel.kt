@@ -66,6 +66,19 @@ class SearchViewModel @Inject constructor(
 
     private var searchJob: Job? = null
 
+    // See BrowseViewModel.goBack's comment - same fix, unconditional
+    // here since search has no Library-style exception: leaving the
+    // real Spotify page stuck wherever the user last tapped into (e.g.
+    // an album) would break the very next tap on a different search
+    // result, since that lookup runs against whatever page is actually
+    // showing, not this screen's own already-fetched result list.
+    fun goBack(onBack: () -> Unit) {
+        viewModelScope.launch {
+            runCatching { apiService.browserBack() }
+            onBack()
+        }
+    }
+
     fun onQueryChange(newQuery: String) {
         query = newQuery
         val label = librarySearchShortcutLabels[newQuery.trim().lowercase()]
