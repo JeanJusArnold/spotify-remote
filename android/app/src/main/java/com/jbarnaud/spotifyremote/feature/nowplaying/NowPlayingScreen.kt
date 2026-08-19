@@ -600,10 +600,9 @@ private fun PlayPauseButton(
 
 // No background - the cover/title/seekbar/controls underneath stay
 // visible, this just floats "BUFFER" on top of them. Only the text
-// pulses, once every two seconds (1000ms fade out + 1000ms fade back in
-// via RepeatMode.Reverse). Anchored at the zone's own bottom-right
-// corner and tilted, banner-style, rather than sitting flat and
-// centered.
+// pulses, once every 1.5s (750ms fade out + 750ms fade back in via
+// RepeatMode.Reverse). Anchored at the zone's own bottom-right corner
+// and tilted, banner-style, rather than sitting flat and centered.
 //
 // fittedFontSizeSp is solved so the ROTATED bounding box (not the flat
 // text width) fits inside the zone's own maxWidth/maxHeight - a first
@@ -618,7 +617,7 @@ private fun BufferOverlay(modifier: Modifier = Modifier) {
         initialValue = 0.3f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1000, easing = LinearEasing),
+            animation = tween(durationMillis = 750, easing = LinearEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "buffer-alpha"

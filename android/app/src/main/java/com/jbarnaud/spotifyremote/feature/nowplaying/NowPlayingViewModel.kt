@@ -93,8 +93,9 @@ class NowPlayingViewModel @Inject constructor(
     // ready", ~2.8s from the tap itself - consistently, no segment-grid
     // wait left to inflate it. Some margin kept above the raw
     // measurement for real audible sound (not just ExoPlayer's own
-    // READY) and normal variance.
-    private val AUDIO_BUFFERING_DISPLAY_MS = 4000L
+    // READY) and normal variance - trimmed slightly further to 3000L
+    // by request, close to (but still above) the ~2.8s raw measurement.
+    private val AUDIO_BUFFERING_DISPLAY_MS = 3000L
 
     private val _audioBuffering = MutableStateFlow(false)
     private var audioBufferingClearJob: Job? = null
@@ -396,6 +397,12 @@ class NowPlayingViewModel @Inject constructor(
                     pauseDeadlineElapsedMs = SystemClock.elapsedRealtime() + response.pauseLandsInMs
                 } catch (e: Exception) { /* mpris_blocked backstop - see comment above */ }
             } else {
+                // Not wired to this button before the continuous-relay
+                // redesign - a resume genuinely spawns a fresh encoder
+                // server-side now (see ensureEncoderRunning in
+                // server.js), the same real audio gap next/previous
+                // already covers, so it earns the same overlay.
+                audioBufferingTrigger.notifyTrackChangeRequested()
                 try {
                     apiService.play()
                 } catch (e: Exception) { /* mpris_blocked backstop - see comment above */ }
