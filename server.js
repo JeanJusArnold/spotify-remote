@@ -1305,7 +1305,16 @@ function scrapeWhatsNewRows() {
                 cover: row.querySelector('img')?.src || ""
             };
 
-        }).filter(Boolean);
+        }).filter(Boolean).filter((item, index, all) => {
+            // Confirmed live 2026-08-19: this feed can shift while
+            // scrolling (a new release landing at the top mid-scrape, or
+            // Spotify's own +10-per-scroll pagination overlapping by a
+            // row) - real result was the same album's <li> appearing
+            // twice in the DOM, same id, crashing the Android client's
+            // LazyColumn (which requires unique keys). Keep the first
+            // occurrence only.
+            return all.findIndex((other) => other.id === item.id) === index;
+        });
 
     });
 
