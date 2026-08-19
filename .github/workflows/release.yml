@@ -1,0 +1,49 @@
+# Builds the Android app and publishes the APK as a GitHub Release
+# whenever a version tag (v*) is pushed - lets someone install the app
+# without setting up an Android build environment themselves. Debug
+# build, not release/signed: this project has no Play Store
+# distribution, so a signed release build would only add the complexity
+# of managing a keystore secret for no real benefit - a debug APK
+# installs and runs identically via sideloading, same as every install
+# done during development (adb install).
+name: Release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+        working-directory: android
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug
+        working-directory: android
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk "app/build/outputs/apk/debug/spotify-remote-${{ github.ref_name }}.apk"
+        working-directory: android
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: android/app/build/outputs/apk/debug/spotify-remote-${{ github.ref_name }}.apk
+          generate_release_notes: true

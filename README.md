@@ -80,7 +80,7 @@ node server.js
 
 ### Connecting the app
 
-Build it from `android/` (`./gradlew assembleDebug`, or open the folder in Android Studio), install the APK on your phone, and enter the server's Tailscale hostname or IP in the app's Settings screen on first run (e.g. `http://<hostname>.<tailnet>.ts.net:3000` or `http://<tailscale-ip>:3000`). This is a one-time setting, editable later.
+Grab the APK from the [Releases page](../../releases) and install it on your phone, or build it yourself from `android/` (`./gradlew assembleDebug`, or open the folder in Android Studio) if you'd rather not trust a prebuilt binary. Either way, enter the server's Tailscale hostname or IP in the app's Settings screen on first run (e.g. `http://<hostname>.<tailnet>.ts.net:3000` or `http://<tailscale-ip>:3000`). This is a one-time setting, editable later.
 
 (The old web page under `public/` still loads at `http://<machine-ip>:3000` from a phone browser if you'd rather not install an APK, but it isn't maintained any more - expect the app above to be the better experience.)
 
