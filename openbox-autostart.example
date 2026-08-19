@@ -8,7 +8,7 @@ until pactl info >/dev/null 2>&1; do
     sleep 0.2
 done
 
-# A virtual sink, used below as the built-in HLS audio relay's (see
+# A virtual sink, used below as the built-in audio relay's (see
 # server.js) ffmpeg capture point - not just a nice-to-have: capturing
 # straight from a normal/default output was unreliable in earlier
 # testing, this dedicated null sink is what made it work consistently.
