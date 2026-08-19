@@ -368,20 +368,48 @@ class PlaybackService : MediaSessionService() {
             // live-manifest fetches only made that worse than just
             // waiting for the real state push once the server (and its
             // fresh encoder) is actually ready.
-            serviceScope.launch { apiService.play() }
+            // Crashed the whole app 2026-08-19 on a real
+            // SocketTimeoutException (network hiccup reaching the
+            // server) - these come from system-level transport controls
+            // (lock screen, Bluetooth headset), so a transient failure
+            // here is routine, not exceptional; an uncaught exception
+            // in launch{} would otherwise crash the whole process.
+            serviceScope.launch { runCatching { apiService.play() } }
         }
 
         override fun pause() {
             localPlaybackIntentTrigger.requestPlaying(false)
-            serviceScope.launch { apiService.pause() }
+            serviceScope.launch { runCatching { apiService.pause() } }
         }
 
         override fun seekToNext() {
-            serviceScope.launch { apiService.next() }
+            serviceScope.launch { runCatching { apiService.next() } }
         }
 
         override fun seekToPrevious() {
-            serviceScope.launch { apiService.previous() }
+            serviceScope.launch { runCatching { apiService.previous() } }
+        }
+
+        // Without this, seekToNext/seekToPrevious above are wired up but
+        // never actually reachable from the notification/lock screen -
+        // ForwardingPlayer forwards availableCommands to the real
+        // ExoPlayer by default, which only ever has ONE MediaItem
+        // attached (a continuous live stream, not a playlist), so
+        // hasNextMediaItem()/hasPreviousMediaItem() report false and
+        // MediaStyleNotificationHelper's MediaStyle (which derives its
+        // buttons from available commands, same as it already does for
+        // play/pause with no manual notification action code) hides
+        // both buttons entirely. The server always has a real next/
+        // previous track regardless of what ExoPlayer's own single-item
+        // view of the world thinks, so these are unconditionally
+        // available here.
+        override fun getAvailableCommands(): Player.Commands {
+            return super.getAvailableCommands().buildUpon()
+                .add(Player.COMMAND_SEEK_TO_NEXT)
+                .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                .build()
         }
 
     }

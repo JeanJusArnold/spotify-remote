@@ -437,8 +437,16 @@ class NowPlayingViewModel @Inject constructor(
         fire { apiService.seek(percent) }
     }
 
+    // Crashed the whole app 2026-08-19 on a real SocketTimeoutException
+    // (network hiccup reaching the server) - an uncaught exception in a
+    // launch{} block crashes the process, same class of bug pause()/
+    // play() above already guard against.
     private fun fire(call: suspend () -> Unit) {
-        viewModelScope.launch { call() }
+        viewModelScope.launch {
+            try {
+                call()
+            } catch (e: Exception) { /* transient network failure - nothing to surface for a fire-and-forget action */ }
+        }
     }
 
 }
