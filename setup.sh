@@ -115,7 +115,12 @@ else
     fi
 fi
 
-if command -v tailscale >/dev/null 2>&1; then
+USE_OWN_VPN=0
+if confirm "Utilisez-vous déjà un service VPN pour accéder à cet ordinateur à distance ?"; then
+    USE_OWN_VPN=1
+    note "Ignoré - Tailscale ne sera pas installé. Utilisez l'adresse fournie par votre VPN"
+    note "existant pour configurer l'app Android."
+elif command -v tailscale >/dev/null 2>&1; then
     note "Tailscale: déjà présent"
 else
     note "Tailscale introuvable. Son installeur officiel fonctionne sur la quasi-totalité des"
@@ -183,7 +188,9 @@ fi
 # ---------------------------------------------------------------------
 
 TAILSCALE_ADDR=""
-if command -v tailscale >/dev/null 2>&1; then
+if [ "$USE_OWN_VPN" -eq 1 ]; then
+    :
+elif command -v tailscale >/dev/null 2>&1; then
     step "Tailscale"
     if tailscale status >/dev/null 2>&1; then
         note "Déjà connecté."
@@ -455,6 +462,9 @@ step "Terminé"
 note "Pour démarrer le serveur : node server.js"
 if [ -n "$TAILSCALE_ADDR" ]; then
     note "Adresse à entrer dans les Paramètres de l'app Android : http://$TAILSCALE_ADDR:3000"
+elif [ "$USE_OWN_VPN" -eq 1 ]; then
+    note "Entrez l'adresse fournie par votre VPN pour cette machine dans les Paramètres de"
+    note "l'app Android (port 3000)."
 else
     note "Configurez Tailscale (ou utilisez l'IP locale de cette machine) pour vous connecter"
     note "depuis l'app Android - voir README.md."
