@@ -844,6 +844,7 @@ async function fixArabicLocaleBug() {
         sameSite: "None"
     }]);
     await page.reload({ waitUntil: "domcontentloaded" });
+    await injectStateObserver();
 }
 
 // the "ar" cookie doesn't always land the instant a playlist opens - it
@@ -2072,6 +2073,7 @@ app.get("/resolve-link", async (req, res) => {
         }
 
         await page.goto(`https://open.spotify.com/${type}/${id}`, { waitUntil: "domcontentloaded" });
+        await injectStateObserver();
 
         // "main h1" covers track/album/playlist reliably (confirmed
         // live) - artist pages don't render the name as an h1 at all, so
@@ -3998,11 +4000,23 @@ app.get("/seek", async (req, res) => {
 // animations); pushStateIfChanged's own before/after comparison is what
 // actually filters those out, this debounce just keeps the round trip
 // into Node from firing on every single one of them.
-async function setupStatePush() {
-
+async function exposeStateChangeBinding() {
     await page.exposeFunction("__notifyStateMightHaveChanged", () => {
         pushStateIfChanged();
     });
+}
+
+// (Re)installs the DOM observer that drives live state pushes. Needed
+// once at boot, and again after ANY real navigation (page.goto/
+// page.reload) - those replace the document entirely, silently dropping
+// whatever a plain page.evaluate() previously injected into it (unlike
+// page.exposeFunction's binding above, which Playwright automatically
+// reinstalls on every new document, so that part doesn't need repeating).
+// Confirmed live: forgetting this after a real navigation doesn't error
+// anywhere, it just silently stops all future state pushes for the rest
+// of the process, surfacing as "the PC plays fine but the app stops
+// following" - easy to miss until exactly that's reported.
+async function injectStateObserver() {
 
     await page.evaluate(() => {
         let debounceTimer = null;
@@ -4020,6 +4034,11 @@ async function setupStatePush() {
         });
     });
 
+}
+
+async function setupStatePush() {
+    await exposeStateChangeBinding();
+    await injectStateObserver();
 }
 
 const httpServer = app.listen(PORT, "0.0.0.0", async () => {
