@@ -36,6 +36,7 @@ import com.jbarnaud.spotifyremote.network.dto.StateResponse
 import com.jbarnaud.spotifyremote.settings.SettingsRepository
 import com.jbarnaud.spotifyremote.state.LocalPlaybackIntentTrigger
 import com.jbarnaud.spotifyremote.state.PlaybackStateRepository
+import com.jbarnaud.spotifyremote.state.QueueRefreshTrigger
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -108,6 +109,9 @@ class PlaybackService : MediaSessionService() {
 
     @Inject
     lateinit var localPlaybackIntentTrigger: LocalPlaybackIntentTrigger
+
+    @Inject
+    lateinit var queueRefreshTrigger: QueueRefreshTrigger
 
     @Inject
     lateinit var okHttpClient: OkHttpClient
@@ -476,6 +480,17 @@ class PlaybackService : MediaSessionService() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "/state-stream connected")
                 wsRetryDelayMs = WS_INITIAL_RETRY_DELAY_MS
+                // The server's own state push on connect (scrapeState()
+                // in the wss.on("connection") handler) resyncs
+                // title/playing/position for free, but the queue panel
+                // is a separate poll keyed off a title CHANGE (see
+                // NowPlayingViewModel's own comment) - if the same track
+                // was already playing/paused across a disconnect (PC
+                // session down, phone backgrounded a while, etc.), that
+                // title never changes on reconnect even though the real
+                // queue may have moved on. Reusing this trigger forces
+                // a refresh on every reconnect regardless.
+                queueRefreshTrigger.requestRefresh()
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
