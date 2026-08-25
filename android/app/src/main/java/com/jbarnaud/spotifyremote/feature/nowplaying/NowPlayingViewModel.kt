@@ -46,6 +46,7 @@ data class NowPlayingUiState(
     val positionSeconds: Int = 0,
     val durationSeconds: Int = 0,
     val shuffle: Boolean = false,
+    val smartShuffle: Boolean = false,
     val repeat: String = "off",
     val playPauseShielded: Boolean = false,
     val audioBuffering: Boolean = false
@@ -256,6 +257,7 @@ class NowPlayingViewModel @Inject constructor(
                 positionSeconds = (basePositionSeconds + elapsedSeconds).coerceAtMost(durationSeconds),
                 durationSeconds = durationSeconds,
                 shuffle = state.shuffle,
+                smartShuffle = state.smartShuffle,
                 repeat = state.repeat,
                 playPauseShielded = shielded,
                 audioBuffering = buffering
@@ -420,7 +422,20 @@ class NowPlayingViewModel @Inject constructor(
         fire { apiService.previous() }
     }
 
-    fun onShuffleClick() = fire { apiService.shuffle() }
+    // Re-shuffling reorders "À suivre" without ever changing the playing
+    // title, so nothing else here would trigger a refresh of it (same gap
+    // as onQueueRemove above) - the server's own /shuffle response is
+    // already held until the reorder is actually visible server-side (see
+    // server.js), so it's safe to refresh right after it returns instead
+    // of needing another active wait on this end.
+    fun onShuffleClick() {
+        viewModelScope.launch {
+            try {
+                apiService.shuffle()
+                refreshQueue()
+            } catch (e: Exception) { /* transient network failure - nothing to surface for a fire-and-forget action */ }
+        }
+    }
     fun onRepeatClick() = fire { apiService.repeat() }
 
     fun onSeek(percent: Float) {

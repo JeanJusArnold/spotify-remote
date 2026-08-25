@@ -1003,9 +1003,47 @@ app.get("/previous", requiresMprisUnblocked(async (req, res) => {
 
 
 app.get("/shuffle", async (req, res) => {
+
+    // Toggling shuffle re-shuffles the "À suivre" queue on Spotify's own
+    // backend, not instantly - confirmed live it can take ~700-1000ms
+    // after the click for the panel's row order to actually change. The
+    // Android client refreshes its queue view right after this responds
+    // (same trigger used for queue-add), so responding too early is the
+    // same class of race as [[queue_add_refresh_race]]: the client's
+    // refresh would land before the reorder and show the stale,
+    // pre-shuffle order. Only directly observable while the queue panel
+    // is already open on the PC; when it isn't, there's nothing to poll,
+    // so just wait out the same real-world delay instead of a guess with
+    // no grounding.
+    const rowsBefore = await page.evaluate(() => {
+        const list = document.querySelector('ul[aria-label="À suivre"]');
+        if (!list) return null;
+        return [...list.querySelectorAll('li[role="row"]')].slice(0, 3).map(row =>
+            row.querySelector('[id^="listrow-title-"]')?.innerText || ""
+        );
+    });
+
     await controls.shuffle.click({
         noWaitAfter: true
     });
+
+    if (rowsBefore) {
+        await page.waitForFunction(
+            (rowsBefore) => {
+                const list = document.querySelector('ul[aria-label="À suivre"]');
+                if (!list) return true;
+                const rowsNow = [...list.querySelectorAll('li[role="row"]')].slice(0, 3).map(row =>
+                    row.querySelector('[id^="listrow-title-"]')?.innerText || ""
+                );
+                return JSON.stringify(rowsNow) !== JSON.stringify(rowsBefore);
+            },
+            rowsBefore,
+            { timeout: 3000 }
+        ).catch(() => {});
+    } else {
+        await page.waitForTimeout(1200);
+    }
+
     res.send("ok");
 });
 
@@ -1154,6 +1192,22 @@ async function scrapeState() {
         const shuffle =
             shuffleButton?.classList.contains("encore-internal-color-text-bright-accent") || false;
 
+        // The button actually cycles through 3 states on click: off ->
+        // classic shuffle -> "smart" shuffle (mixes in similar tracks not
+        // in the original context) -> off again - confirmed live via CDP.
+        // Both shuffle states share the same active color class above, so
+        // they're indistinguishable from that alone; the aria-label text
+        // (what clicking the button would DO next, not the current state)
+        // is the only DOM signal that tells them apart: "Activer ...
+        // intelligente" means classic is currently active (next click
+        // would turn smart ON), "Désactiver ... intelligente" means smart
+        // is currently active (next click turns everything off). Same
+        // French-aria-label-parsing precedent as the library follow-state
+        // scrape elsewhere in this file - fine for a single-account
+        // personal system.
+        const smartShuffle =
+            shuffle && (shuffleButton?.getAttribute("aria-label") || "").startsWith("Désactiver");
+
         const repeatChecked =
             document.querySelector(
                 '[data-testid="control-button-repeat"]'
@@ -1172,6 +1226,7 @@ async function scrapeState() {
             duration,
             cover,
             shuffle,
+            smartShuffle,
             repeat
         };
 

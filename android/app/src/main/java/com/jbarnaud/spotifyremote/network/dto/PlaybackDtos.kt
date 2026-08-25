@@ -19,6 +19,11 @@ data class StateResponse(
     val duration: String,
     val cover: String,
     val shuffle: Boolean,
+    // Web Player's shuffle button actually cycles off -> classic -> smart
+    // (mixes in similar tracks from outside the current context) -> off;
+    // both shuffle states report shuffle=true, this is what tells them
+    // apart. Default false so older cached/partial responses still decode.
+    val smartShuffle: Boolean = false,
     val repeat: String,
     val mprisBlocked: Boolean = false
 )

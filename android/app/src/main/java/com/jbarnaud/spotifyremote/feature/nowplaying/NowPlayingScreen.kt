@@ -224,12 +224,42 @@ fun NowPlayingScreen(
         ) {
 
             IconButton(onClick = viewModel::onShuffleClick) {
-                Icon(
-                    painterResource(R.drawable.ic_shuffle),
-                    contentDescription = "Aléatoire",
-                    tint = if (uiState.shuffle) SpotifyColors.Green else SpotifyColors.TextPrimary,
-                    modifier = Modifier.size(20.dp)
-                )
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        painterResource(R.drawable.ic_shuffle),
+                        contentDescription = if (uiState.smartShuffle) "Aléatoire intelligent" else "Aléatoire",
+                        tint = if (uiState.shuffle) SpotifyColors.Green else SpotifyColors.TextPrimary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    // Web Player's shuffle button cycles off -> classic ->
+                    // "smart" (mixes in similar tracks from outside the
+                    // current context) -> off, but only exposes ONE
+                    // color-change signal for both non-off states (see
+                    // scrapeState's own comment in server.js) - this "+"
+                    // is the only visual difference between classic and
+                    // smart here, deliberately kept small/corner-anchored
+                    // so the base shuffle icon+color still reads exactly
+                    // as before for the classic case.
+                    if (uiState.smartShuffle) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .align(Alignment.TopEnd)
+                                .offset(x = 3.dp, y = (-2).dp)
+                                .clip(CircleShape)
+                                .background(SpotifyColors.Background),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                "+",
+                                color = SpotifyColors.Green,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                lineHeight = 10.sp
+                            )
+                        }
+                    }
+                }
             }
 
             IconButton(onClick = viewModel::onPrevious) {
