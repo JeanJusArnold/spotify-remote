@@ -674,8 +674,15 @@ async function waitForStableCount(locator, { checks = 3, interval = 400, timeout
 // fresh one - the queue panel's rows update in place (same element
 // count before and after a track change), so only comparing their
 // actual content catches Spotify's own React re-render still being in
-// flight.
-async function waitForStableValue(getValue, { checks = 2, interval = 250, timeout = 3000 } = {}) {
+// flight. Same generous default budget as waitForStableCount (still
+// exits early the moment 3 reads in a row agree, usually within one or
+// two intervals) rather than a shorter one - the one confirmed live
+// report of this race was the very FIRST track played in a freshly
+// booted session, where Spotify likely has more to bootstrap (its own
+// queue/connect-state service, not just this one row's re-render) than
+// a mid-session track change - no reason to assume that always finishes
+// as fast as the warm-session case this was tuned against.
+async function waitForStableValue(getValue, { checks = 3, interval = 400, timeout = 8000 } = {}) {
 
     const start = Date.now();
     let last = null;
