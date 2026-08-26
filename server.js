@@ -2080,6 +2080,15 @@ app.get("/play-result", requiresMprisUnblocked(async (req, res) => {
         }
 
         if (!clicked) {
+            // Silent from the client's perspective otherwise: the
+            // buffering overlay it shows on tap (AudioBufferingTrigger)
+            // is a plain fixed-duration timer, not gated on confirming
+            // this specific track actually started - so a 404 here reads
+            // to the user as "nothing happened, or the wrong/previous
+            // track kept playing", not as a clear error. Logging id and
+            // the page's current URL/title makes a failed click here
+            // diagnosable after the fact instead of only guessable.
+            console.error(`[play-result] not found: id=${id} url=${page.url()} title=${await page.title().catch(() => "?")}`);
             return res.status(404).send("not found");
         }
 
