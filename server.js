@@ -669,6 +669,38 @@ async function waitForStableCount(locator, { checks = 3, interval = 400, timeout
     return lastCount;
 }
 
+// Same stability-polling shape as waitForStableCount above, but for
+// cases where the row COUNT alone can't tell a stale render from a
+// fresh one - the queue panel's rows update in place (same element
+// count before and after a track change), so only comparing their
+// actual content catches Spotify's own React re-render still being in
+// flight.
+async function waitForStableValue(getValue, { checks = 2, interval = 250, timeout = 3000 } = {}) {
+
+    const start = Date.now();
+    let last = null;
+    let stableChecks = 0;
+    let current = await getValue();
+
+    while (Date.now() - start < timeout) {
+
+        const key = JSON.stringify(current);
+
+        if (key === last) {
+            stableChecks++;
+            if (stableChecks >= checks) return current;
+        } else {
+            stableChecks = 0;
+            last = key;
+        }
+
+        await new Promise(r => setTimeout(r, interval));
+        current = await getValue();
+    }
+
+    return current;
+}
+
 async function clickDiscographyChip(chipLabel) {
 
     return await evaluateAndClick((label) => {
@@ -1088,7 +1120,7 @@ async function getContextAndQueue() {
         ]).catch(() => {});
     }
 
-    const result = await page.evaluate(() => {
+    const scrape = () => page.evaluate(() => {
 
         function scrapeRows(list) {
 
@@ -1137,7 +1169,17 @@ async function getContextAndQueue() {
 
     });
 
-    return result;
+    // The panel's <ul> mounting (waited for above) doesn't mean its ROWS
+    // already reflect the current track - Spotify re-renders existing
+    // row elements in place rather than remounting them on a context
+    // change, so the very first scrape right after a track change can
+    // still read the previous context's queue. Confirmed live: title
+    // updates immediately (separate DOM node, separate observer path -
+    // see injectStateObserver), but this panel visibly lags behind it by
+    // up to roughly a second, worse right after a fresh Chromium/session
+    // start. Poll until two consecutive reads agree instead of trusting
+    // the first one.
+    return await waitForStableValue(scrape);
 
 }
 
