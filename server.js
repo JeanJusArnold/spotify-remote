@@ -2093,27 +2093,25 @@ app.get("/play-result", requiresMprisUnblocked(async (req, res) => {
         }
 
         res.send("ok");
-        selfHealTowards(true);
 
-        // Diagnostic only (2026-08-26): reported live that the clicked
-        // track visibly started, then the PREVIOUSLY-paused track
-        // relaunched over it a moment later - on a fresh Chromium/
-        // session boot specifically. The click itself isn't the
-        // suspect here (it worked), so this snapshots page.title() (has
-        // the "<track> • <artist>" shape - see connectSpotify's own log
-        // line) at a few points after a successful click to see whether
-        // it flips back on its own, and if so how fast. Remove once the
-        // actual mechanism is confirmed; not meant to stay long-term.
-        const clickedTitle = await page.title().catch(() => "?");
-        console.log(`[play-result-diag] id=${id} title right after click: ${clickedTitle}`);
-        for (const delayMs of [800, 2000, 4000]) {
-            setTimeout(async () => {
-                const t = await page.title().catch(() => "?");
-                if (t !== clickedTitle) {
-                    console.warn(`[play-result-diag] id=${id} title changed by +${delayMs}ms: "${clickedTitle}" -> "${t}"`);
-                }
-            }, delayMs);
-        }
+        // Deliberately NOT calling selfHealTowards() here, unlike /next
+        // and /previous's own generic-resume case (/queue-play dropped
+        // it too, see its own comment) - confirmed live 2026-08-26
+        // (diagnostic logging, since removed) that it actively CAUSES
+        // the exact bug it looks like it'd fix.
+        // selfHealTowards exists for MPRIS commands whose acknowledgment
+        // can be a stale no-op (see its own comment) - this route
+        // doesn't use MPRIS at all, it's a real DOM click, which doesn't
+        // have that failure mode. What it DOES have is a track SWITCH in
+        // flight: right after the click, Spotify's player can still be
+        // internally on the PREVIOUS track for up to ~1-2s (worse right
+        // after a fresh Chromium/session boot) before it actually swaps
+        // over. selfHealTowards' blind controls.playPause.click() during
+        // that window doesn't "heal" anything - it toggles whatever
+        // Spotify still has loaded, which is the previous track, and
+        // that resumes IT instead. Confirmed live: tapped track visibly
+        // started, then the previous (paused) track relaunched over it
+        // a moment later - exactly this race.
 
     } catch (e) {
         console.error(e);
@@ -3996,7 +3994,10 @@ app.get("/queue-play", requiresMprisUnblocked(async (req, res) => {
         }
 
         res.send("ok");
-        selfHealTowards(true);
+
+        // No selfHealTowards() here either - see /play-result's own
+        // comment. Same real-DOM-click track switch, same risk of
+        // toggling back into the previous track mid-transition.
 
     } catch (e) {
         console.error(e);
