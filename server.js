@@ -3514,6 +3514,14 @@ app.get("/playlist", async (req, res) => {
 
         await ensureFrenchLocale(id);
 
+        // Diagnostic only (2026-08-26): a /play-result 404 was logged
+        // with the page sitting on /collection/tracks right after the
+        // user says they were browsing a DIFFERENT playlist - either
+        // this navigation never actually landed where scraping/response
+        // below implies, or something moved the page again afterward.
+        // Logging the url actually reached here narrows down which.
+        console.log(`[playlist-diag] id=${id} navigated to url=${page.url()}`);
+
         await waitForStableCount(page.locator('[data-testid="tracklist-row"]'));
 
         await scrollTracklistToTop();
