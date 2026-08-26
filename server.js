@@ -40,11 +40,10 @@ const PORT = 3000;
 // speed convergence), for no offsetting benefit in this single-client,
 // LAN-via-Tailscale use case.
 
-// Single, persistent sink - always linked to the real audio chain (the
-// last hop of the existing EasyEffects processing, set up outside this
-// repo - see [[pipewire_chromium_routing_drift]]). Never switched or
-// touched by this project; see the encoder-rotation design below for why
-// that's no longer needed.
+// Single, persistent sink - Chromium/Spotify's audio output routes
+// straight into it (see [[pipewire_chromium_routing_drift]]). Never
+// switched or touched by this project; see the encoder-rotation design
+// below for why that's no longer needed.
 //
 // The encoder used to also rotate at every track transition (two
 // dedicated sinks, alternating, switched via pw-link at the detected

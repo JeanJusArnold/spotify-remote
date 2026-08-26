@@ -2,9 +2,9 @@
 
 # Automates as much of this project's PC-side setup as can be done
 # safely on an unknown machine: system requirements, the PipeWire
-# virtual audio sink, Tailscale, optionally EasyEffects and a dedicated
-# openbox autostart session, then launching Chromium and the server
-# itself. See README.md's Setup section for the manual walkthrough this
+# virtual audio sink, Tailscale, optionally a dedicated openbox
+# autostart session, then launching Chromium and the server itself.
+# See README.md's Setup section for the manual walkthrough this
 # mirrors - re-run this any time, every step checks whether it's
 # already done before acting.
 #
@@ -210,57 +210,7 @@ elif command -v tailscale >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------
-# 6. EasyEffects (optional)
-# ---------------------------------------------------------------------
-
-EASYEFFECTS_INSTALLED=0
-
-step "EasyEffects"
-if confirm "Voulez-vous installer EasyEffects ? Indispensable pour adapter le niveau de gain des titres, à moins que vous ne vouliez le faire avec un de vos logiciels"; then
-
-    if command -v flatpak >/dev/null 2>&1; then
-        note "flatpak: déjà présent"
-    else
-        install_pkg "flatpak" "flatpak"
-    fi
-
-    if command -v flatpak >/dev/null 2>&1; then
-        if flatpak list 2>/dev/null | grep -q com.github.wwmm.easyeffects; then
-            note "EasyEffects: déjà installé."
-            EASYEFFECTS_INSTALLED=1
-        else
-            note "flatpak install flathub com.github.wwmm.easyeffects"
-            if confirm "Installer EasyEffects maintenant ?"; then
-                flatpak install -y flathub com.github.wwmm.easyeffects && EASYEFFECTS_INSTALLED=1
-            fi
-        fi
-    else
-        note "flatpak indisponible - installez EasyEffects manuellement si vous en avez besoin."
-    fi
-
-    if [ "$EASYEFFECTS_INSTALLED" -eq 1 ]; then
-        note "Lancement d'EasyEffects..."
-        flatpak run com.github.wwmm.easyeffects >/dev/null 2>&1 &
-        until pactl list short sinks 2>/dev/null | grep -q easyeffects; do
-            sleep 0.5
-        done
-        echo
-        note "EasyEffects est lancé. Réglages à faire une seule fois, dans sa fenêtre :"
-        note "  1. Onglet Output (sortie)"
-        note "  2. Ajoutez l'effet \"Auto Gain\""
-        note "  3. Reference : Integrated"
-        note "  4. Max History : 40s"
-        note "  5. Target : -20dB"
-        note "  6. Silence Threshold : -70dB"
-        note "(Ces réglages sont sauvegardés automatiquement - à faire une seule fois.)"
-        read -r -p "Appuyez sur Entrée une fois ces réglages faits pour continuer... "
-    fi
-else
-    note "Ignoré."
-fi
-
-# ---------------------------------------------------------------------
-# 7. dedicated openbox session (optional)
+# 6. dedicated openbox session (optional)
 # ---------------------------------------------------------------------
 
 step "Session dédiée (optionnel)"
@@ -386,14 +336,6 @@ pactl set-sink-volume spotify-remote-audio 100%
 
 EOF
 
-        if [ "$EASYEFFECTS_INSTALLED" -eq 1 ]; then
-            cat >> "$AUTOSTART" <<'EOF'
-flatpak run com.github.wwmm.easyeffects &
-until pactl list short sinks | grep -q easyeffects; do sleep 0.2; done
-
-EOF
-        fi
-
         cat >> "$AUTOSTART" <<EOF
 chromium --user-data-dir="\$HOME/.config/chromium-spotify" \\
   --remote-debugging-port=9222 \\
@@ -421,7 +363,7 @@ else
 fi
 
 # ---------------------------------------------------------------------
-# 8. launch Chromium and wait for it to be ready
+# 7. launch Chromium and wait for it to be ready
 # ---------------------------------------------------------------------
 
 step "Lancement de Chromium"
@@ -454,7 +396,7 @@ note "  2. Installez un bloqueur de pub (ex: uBlock Origin) si ce n'est pas déj
 read -r -p "Appuyez sur Entrée une fois ces deux étapes faites pour continuer... "
 
 # ---------------------------------------------------------------------
-# 9. finish
+# 8. finish
 # ---------------------------------------------------------------------
 
 step "Terminé"

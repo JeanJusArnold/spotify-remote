@@ -58,15 +58,13 @@ cd spotify-remote
 ./setup.sh
 ```
 
-`setup.sh` walks through everything below interactively: checking/installing system requirements, creating the virtual audio sink, Tailscale, optionally EasyEffects (with the exact settings to enter), optionally the dedicated-session autostart file, then launching Chromium and the server. It only ever installs something after asking first, and it's safe to re-run — every step checks whether it's already done before acting. The rest of this section is what it automates, kept here for anyone who'd rather do it by hand or understand what the script is doing.
+`setup.sh` walks through everything below interactively: checking/installing system requirements, creating the virtual audio sink, Tailscale, optionally the dedicated-session autostart file, then launching Chromium and the server. It only ever installs something after asking first, and it's safe to re-run — every step checks whether it's already done before acting. The rest of this section is what it automates, kept here for anyone who'd rather do it by hand or understand what the script is doing.
 
 ```bash
 npm install
 ```
 
 `openbox-autostart.example` documents a full recommended session setup (virtual audio sink, launching Chromium, and launching the server itself) as a copyable template for a dedicated session running just this project — copy it to `~/.config/openbox/autostart` (or let `setup.sh` generate it for you).
-
-Optionally, [EasyEffects](https://github.com/wwmm/easyeffects) can sit between Chromium and the virtual sink to level out loudness differences between tracks. `openbox-autostart.example` has the details (install command, and the Auto Gain settings this project settled on).
 
 If you set this dedicated session up, make sure your display manager doesn't boot straight into it. It's also not something you want live right after a cold boot, especially since a minimal session like this is more likely to fail to start cleanly than your main one. On GDM with autologin enabled, this is a real pitfall: it silently re-logs into whichever session was last selected at the greeter (tracked per-user by AccountsService), so picking the dedicated session there even once makes it the autologin target from then on. Pin your main session instead by writing it directly to `/var/lib/AccountsService/users/<username>` (e.g. `Session=gnome`, `SessionType=wayland`) so autologin always lands there regardless of what was last picked manually.
 
