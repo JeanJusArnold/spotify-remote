@@ -66,7 +66,29 @@ npm install
 
 `openbox-autostart.example` documents a full recommended session setup (virtual audio sink, launching Chromium, and launching the server itself) as a copyable template for a dedicated session running just this project — copy it to `~/.config/openbox/autostart` (or let `setup.sh` generate it for you).
 
-If you set this dedicated session up, make sure your display manager doesn't boot straight into it. It's also not something you want live right after a cold boot, especially since a minimal session like this is more likely to fail to start cleanly than your main one. On GDM with autologin enabled, this is a real pitfall: it silently re-logs into whichever session was last selected at the greeter (tracked per-user by AccountsService), so picking the dedicated session there even once makes it the autologin target from then on. Pin your main session instead by writing it directly to `/var/lib/AccountsService/users/<username>` (e.g. `Session=gnome`, `SessionType=wayland`) so autologin always lands there regardless of what was last picked manually.
+If you set this dedicated session up, make sure your display manager doesn't boot straight into it. It's also not something you want live right after a cold boot, especially since a minimal session like this is more likely to fail to start cleanly than your main one.
+
+### Known pitfalls with the dedicated session
+
+**GDM autologin can lock onto it.** With autologin enabled, GDM silently re-logs into whichever session was last selected at the greeter (tracked per-user by AccountsService), so picking the dedicated session there even once makes it the autologin target from then on. Pin your main session instead — run this from a terminal in your **main** session, not the dedicated one:
+
+```bash
+sudo tee /var/lib/AccountsService/users/<username> > /dev/null <<'EOF'
+[User]
+Session=gnome
+SessionType=wayland
+EOF
+```
+
+(swap `gnome`/`wayland` for whatever your main session actually reports — `echo $XDG_SESSION_DESKTOP $XDG_SESSION_TYPE` while logged into it). Verify with `cat /var/lib/AccountsService/users/<username>`, then reboot to confirm it lands straight on your main session with no greeter at all. To revert, either select the dedicated session once at the greeter and log in normally (accountsservice rewrites this file on its own), or rerun the command above with the dedicated session's own name/type instead.
+
+**`sudo` inside the dedicated session can crash Chromium.** `sudo` triggers `uresourced`, which has been observed killing Chromium in this minimal session. Avoid running `sudo` there at all — do administrative tasks (including `tailscale up`/`down`) from your main session instead. If you'd rather let the dedicated session restart Tailscale itself without ever needing `sudo` there, grant your user operator rights once, from your main session:
+
+```bash
+sudo tailscale set --operator=<username>
+```
+
+This lets `<username>` run `tailscale up`/`tailscale down` without `sudo` afterward — check it took with `tailscale status --json | grep -i operator` (no `sudo` needed for that check).
 
 If you'd rather skip the dedicated-session setup entirely, three manual steps are all you actually need: launch Chromium with the command from the [Requirements](#requirements) section above, log into Spotify in it, then start the server:
 
