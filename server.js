@@ -830,6 +830,25 @@ async function connectSpotify() {
     // URL instead of assuming it's contexts[0].pages()[0]
     page = pages.find(p => p.url().includes("open.spotify.com")) || pages[0];
 
+    // Confirmed live 2026-08-27: the state-push MutationObserver (see
+    // injectStateObserver) went silently dead mid-session - a real DOM
+    // change (shuffle toggle) happened, /state read it correctly, but
+    // zero /state-stream clients got pushed, surfacing to the user as
+    // "the PC plays fine but the app stops following" (exactly the
+    // failure mode injectStateObserver's own comment already warned
+    // about). The two explicit reinstall call sites only cover
+    // navigations THIS code itself triggers (page.goto/page.reload) -
+    // a real navigation from outside that code (e.g. a manual F5 at
+    // the physical keyboard, used to recover from an anti-bot
+    // lockdown per README) replaces the document just the same but
+    // was never being caught. page.on("load") fires on every real
+    // navigation regardless of what triggered it, so this closes that
+    // gap generically instead of chasing every possible trigger.
+    page.on("load", () => {
+        injectStateObserver().catch(e =>
+            console.error("[state-observer] reinject after load failed:", e.message));
+    });
+
     cdpSession = await page.context().newCDPSession(page);
 
     console.log("Connected to Spotify:", await page.title());
@@ -4156,7 +4175,11 @@ async function exposeStateChangeBinding() {
 // Confirmed live: forgetting this after a real navigation doesn't error
 // anywhere, it just silently stops all future state pushes for the rest
 // of the process, surfacing as "the PC plays fine but the app stops
-// following" - easy to miss until exactly that's reported.
+// following" - easy to miss until exactly that's reported. The explicit
+// call sites (fixArabicLocaleBug, /resolve-link) cover navigations this
+// code itself triggers; connectSpotify's page.on("load") listener
+// covers everything else (e.g. a manual F5 outside this code) so this
+// doesn't depend on enumerating every possible trigger.
 async function injectStateObserver() {
 
     await page.evaluate(() => {
