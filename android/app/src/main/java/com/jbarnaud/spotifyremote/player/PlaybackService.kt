@@ -394,6 +394,25 @@ class PlaybackService : MediaSessionService() {
             serviceScope.launch { runCatching { apiService.previous() } }
         }
 
+        // Confirmed live 2026-09-03: the lock-screen/notification transport
+        // buttons never reached seekToNext()/seekToPrevious() above - a
+        // logcat capture during real taps showed zero network calls at
+        // all. The system media control widget dispatches skip taps as
+        // seekToNextMediaItem()/seekToPreviousMediaItem(), not the "smart"
+        // seekToNext()/seekToPrevious() variants; those weren't overridden,
+        // so ForwardingPlayer forwarded them straight to the wrapped
+        // ExoPlayer, which silently no-ops (hasNextMediaItem()/
+        // hasPreviousMediaItem() are false - only one MediaItem is ever
+        // attached, see getAvailableCommands below). Same fix as above,
+        // just for the MediaItem-variant entry points.
+        override fun seekToNextMediaItem() {
+            serviceScope.launch { runCatching { apiService.next() } }
+        }
+
+        override fun seekToPreviousMediaItem() {
+            serviceScope.launch { runCatching { apiService.previous() } }
+        }
+
         // Without this, seekToNext/seekToPrevious above are wired up but
         // never actually reachable from the notification/lock screen -
         // ForwardingPlayer forwards availableCommands to the real
