@@ -226,6 +226,10 @@ fun BrowseResultsList(
 
         else -> LazyColumn(modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
 
+            items(listOfNotNull(state.thisIs, state.radio), key = { it.id }) { item ->
+                BrowseResultRow(item, onClick = { onItemClick(item) }, onAddToQueue = onAddToQueue)
+            }
+
             items(state.items, key = { it.id }) { item ->
                 BrowseResultRow(item, onClick = { onItemClick(item) }, onAddToQueue = onAddToQueue)
             }

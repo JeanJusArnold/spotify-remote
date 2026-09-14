@@ -1061,6 +1061,21 @@ app.get("/previous", requiresMprisUnblocked(async (req, res) => {
 
 app.get("/shuffle", async (req, res) => {
 
+    // Spotify disables this button entirely for some playback contexts -
+    // confirmed live 2026-09-14: it stayed aria-disabled="true" for
+    // ~14 minutes straight during a real incident (root cause not
+    // pinned down - didn't reproduce before or since). Playwright's
+    // click() retries against a disabled element for its full default
+    // 30s timeout before giving up, so every tap during that window
+    // hung the whole remote for 30s at a time - 9 of them, back to
+    // back. Checking first and failing fast means a genuinely-
+    // unavailable button can't do that again, regardless of why it's
+    // disabled.
+    const disabled = await controls.shuffle.getAttribute("aria-disabled").catch(() => null);
+    if (disabled === "true") {
+        return res.status(409).send("shuffle unavailable");
+    }
+
     // Toggling shuffle re-shuffles the "À suivre" queue on Spotify's own
     // backend, not instantly - confirmed live it can take ~700-1000ms
     // after the click for the panel's row order to actually change. The
@@ -1259,21 +1274,31 @@ async function scrapeState() {
         const shuffle =
             shuffleButton?.classList.contains("encore-internal-color-text-bright-accent") || false;
 
-        // The button actually cycles through 3 states on click: off ->
-        // classic shuffle -> "smart" shuffle (mixes in similar tracks not
-        // in the original context) -> off again - confirmed live via CDP.
-        // Both shuffle states share the same active color class above, so
-        // they're indistinguishable from that alone; the aria-label text
-        // (what clicking the button would DO next, not the current state)
-        // is the only DOM signal that tells them apart: "Activer ...
-        // intelligente" means classic is currently active (next click
-        // would turn smart ON), "Désactiver ... intelligente" means smart
-        // is currently active (next click turns everything off). Same
-        // French-aria-label-parsing precedent as the library follow-state
-        // scrape elsewhere in this file - fine for a single-account
-        // personal system.
+        // The button cycles through 3 states on click for a normal album/
+        // playlist context: off -> classic shuffle -> "smart" shuffle
+        // (mixes in similar tracks not in the original context) -> off
+        // again - confirmed live via CDP. Both shuffle states share the
+        // same active color class above, so they're indistinguishable
+        // from that alone; the aria-label text (what clicking the button
+        // would DO next, not the current state) is the only DOM signal
+        // that tells them apart: "Activer ... intelligente" means classic
+        // is currently active (next click would turn smart ON),
+        // "Désactiver ... intelligente" means smart is currently active
+        // (next click turns everything off).
+        //
+        // Some contexts (Spotify-generated compilations/mixes, e.g. a
+        // "Running & Cycling with X" album) only ever offer the plain
+        // 2-state toggle - off/"Activer la lecture aléatoire pour X" <->
+        // on/"Désactiver la lecture aléatoire pour X", with "intelligente"
+        // never appearing at all. A bare startsWith("Désactiver") matches
+        // that "on" label too, misreporting smartShuffle:true for plain
+        // shuffle - confirmed live 2026-09-14. Requiring "intelligente" in
+        // the label is what actually distinguishes the two. Same French-
+        // aria-label-parsing precedent as the library follow-state scrape
+        // elsewhere in this file - fine for a single-account personal
+        // system.
         const smartShuffle =
-            shuffle && (shuffleButton?.getAttribute("aria-label") || "").startsWith("Désactiver");
+            shuffle && (shuffleButton?.getAttribute("aria-label") || "").includes("intelligente");
 
         const repeatChecked =
             document.querySelector(
@@ -2545,7 +2570,57 @@ function categorizeReleases(releases) {
 
 }
 
+// Spotify always renders a small, non-expandable "Avec <Artiste>" shelf
+// right after Discographie, whose first two cards are the editorial
+// "This Is <Artiste>" and "Radio <Artiste>" playlists (confirmed live
+// across several artists, big and small - absent only if Spotify never
+// generated those playlists for this artist at all). Only exists on the
+// main artist page, not on the /discography/ sub-page, so this must run
+// before scrapeArtistDiscography's own "voir tout" click navigates away.
+async function scrapeArtistThisIsAndRadio() {
+
+    return await page.evaluate(() => {
+
+        const shelves = [...document.querySelectorAll('[data-testid="component-shelf"]')];
+        const avecShelf = shelves.find(s =>
+            s.querySelector('[data-testid="rich-title-row-shelf-header"]')?.innerText.startsWith('Avec ')
+        );
+
+        if (!avecShelf) return { thisIs: null, radio: null };
+
+        const parseCard = (card) => {
+            const labelledBy = card.getAttribute('aria-labelledby') || "";
+            const uriMatch = labelledBy.match(/spotify:(playlist):([a-zA-Z0-9]+)/);
+            if (!uriMatch) return null;
+            const titleEl = card.querySelector('[id^="card-title-"]');
+            const subtitleEl = card.querySelector('[id^="card-subtitle-"]');
+            const cover = card.querySelector('[data-testid="card-image"]')?.src || "";
+            return {
+                id: uriMatch[2],
+                type: uriMatch[1],
+                title: titleEl?.innerText || "",
+                subtitle: subtitleEl?.innerText || "",
+                cover
+            };
+        };
+
+        const cards = [...avecShelf.querySelectorAll('[data-encore-id="card"]')];
+        const thisIsCard = cards.find(c => c.querySelector('[id^="card-title-"]')?.innerText.startsWith('This Is '));
+        const radioCard = cards.find(c => c.querySelector('[id^="card-title-"]')?.innerText.startsWith('Radio '));
+
+        return {
+            thisIs: thisIsCard ? parseCard(thisIsCard) : null,
+            radio: radioCard ? parseCard(radioCard) : null
+        };
+
+    });
+
+}
+
 async function scrapeArtistDiscography(onFirstRender) {
+
+    let thisIs = null;
+    let radio = null;
 
     // browser-back (see /browser-back) can land here already sitting on
     // the discography/all sub-page from a previous visit - the shelf
@@ -2555,6 +2630,8 @@ async function scrapeArtistDiscography(onFirstRender) {
     if (!page.url().includes("/discography/")) {
 
         await page.waitForSelector('[data-testid="component-shelf"]', { timeout: 8000 });
+
+        ({ thisIs, radio } = await scrapeArtistThisIsAndRadio());
 
         const seeAllClicked = await evaluateAndClick(() => {
             const shelves = [...document.querySelectorAll('[data-testid="component-shelf"]')];
@@ -2639,7 +2716,7 @@ async function scrapeArtistDiscography(onFirstRender) {
 
     const releases = await scrapeAllDiscographyCards((initialCards, isComplete) => {
         wasComplete = isComplete;
-        if (onFirstRender) onFirstRender(categorizeReleases(initialCards), isComplete);
+        if (onFirstRender) onFirstRender({ ...categorizeReleases(initialCards), thisIs, radio }, isComplete);
     });
 
     // the 2/3 resting position is meant to leave room for a future
@@ -2651,7 +2728,7 @@ async function scrapeArtistDiscography(onFirstRender) {
         await scrollArtistDiscographyToFraction(2 / 3);
     }
 
-    return categorizeReleases(releases);
+    return { ...categorizeReleases(releases), thisIs, radio };
 
 }
 

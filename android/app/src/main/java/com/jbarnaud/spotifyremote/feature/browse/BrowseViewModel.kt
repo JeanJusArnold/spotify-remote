@@ -38,6 +38,8 @@ data class BrowseUiState(
     val items: List<BrowseItem> = emptyList(),
     val singles: List<BrowseItem> = emptyList(),
     val compilations: List<BrowseItem> = emptyList(),
+    val thisIs: BrowseItem? = null,
+    val radio: BrowseItem? = null,
     val sections: List<HomeSectionUi> = emptyList(),
     val canLoadMore: Boolean = false,
     val isLoadingMore: Boolean = false
@@ -373,7 +375,9 @@ class BrowseViewModel @Inject constructor(
                     isLoading = false,
                     items = chunk.albums.withFallbackCovers(),
                     singles = chunk.singles.withFallbackCovers(),
-                    compilations = chunk.compilations.withFallbackCovers()
+                    compilations = chunk.compilations.withFallbackCovers(),
+                    thisIs = chunk.thisIs,
+                    radio = chunk.radio
                 )
             }
         }

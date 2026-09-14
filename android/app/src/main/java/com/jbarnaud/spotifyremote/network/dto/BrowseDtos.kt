@@ -27,12 +27,17 @@ interface NdjsonChunk {
 }
 
 // GET /artist and /current-artist - one line per progressive render,
-// see scrapeArtistDiscography/categorizeReleases.
+// see scrapeArtistDiscography/categorizeReleases. thisIs/radio are the
+// artist page's editorial "This Is X"/"Radio X" playlists - null when
+// Spotify never generated them for this artist (see
+// scrapeArtistThisIsAndRadio).
 @Serializable
 data class DiscographyChunk(
     val albums: List<BrowseItem>,
     val singles: List<BrowseItem>,
     val compilations: List<BrowseItem>,
+    val thisIs: BrowseItem? = null,
+    val radio: BrowseItem? = null,
     override val done: Boolean
 ) : NdjsonChunk
 
