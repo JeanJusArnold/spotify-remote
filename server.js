@@ -2622,49 +2622,69 @@ async function scrapeArtistDiscography(onFirstRender) {
     let thisIs = null;
     let radio = null;
 
-    // browser-back (see /browser-back) can land here already sitting on
-    // the discography/all sub-page from a previous visit - the shelf
-    // this function otherwise clicks through to reach that page doesn't
-    // exist there, so re-running those steps would just time out
-    // waiting for it. Skip straight to the grid wait in that case.
-    if (!page.url().includes("/discography/")) {
-
-        await page.waitForSelector('[data-testid="component-shelf"]', { timeout: 8000 });
-
-        ({ thisIs, radio } = await scrapeArtistThisIsAndRadio());
-
-        const seeAllClicked = await evaluateAndClick(() => {
-            const shelves = [...document.querySelectorAll('[data-testid="component-shelf"]')];
-            const discoShelf = shelves.find(s =>
-                s.querySelector('[data-testid="rich-title-row-shelf-header"]')?.innerText.startsWith('Discographie')
-            );
-            return discoShelf?.querySelector('[data-testid="see-all-link"]') || null;
-        });
-
-        if (!seeAllClicked) {
-            throw new Error("discography not found");
-        }
-
-        await page.waitForSelector(
-            '[data-testid="artist-page"] button[aria-controls="sort-and-view-picker"]',
-            { timeout: 8000 }
-        );
-
-        await page.locator(
-            '[data-testid="artist-page"] button[aria-controls="sort-and-view-picker"]'
-        ).click();
-
+    // The "Avec X" shelf thisIs/radio come from - and the Discographie
+    // shelf's own "Voir tout" link - only exist on the artist's plain
+    // page, never on /discography/ itself. Landing here already on
+    // /discography/ happens two ways: real browser-back (see
+    // /browser-back), and - confirmed live 2026-09-17 - simply calling
+    // this again while the shared page happens to still be sitting on
+    // this artist's own discography from an earlier visit (e.g.
+    // BrowseViewModel's onResumed() re-sync after a failed action
+    // elsewhere). The old code skipped straight to the grid wait for
+    // both cases, to avoid timing out waiting for a shelf that isn't
+    // there - but that silently threw away thisIs/radio every time.
+    //
+    // browserBackClick() (not page.goto() - tried that first, confirmed
+    // live it tears down the live audio relay's pipeline by forcing a
+    // real document reload, see /playlist's own comment - and not
+    // page.goBack() either, a programmatic navigation call subject to
+    // the same anti-automation risk as page.reload(), see
+    // browserBackClick's own comment) steps back one real browser-
+    // history entry via a real trusted mouse-back-button input, exactly
+    // the parent artist page here since it's how this function always
+    // arrives at /discography/ in the first place. Same 400ms settle
+    // wait /browser-back itself uses. Same scrape-and-click-through as
+    // the plain case then runs either way - one code path, not two, so
+    // there's no longer a silent-data-loss branch to fall into.
+    if (page.url().includes("/discography/")) {
+        await browserBackClick();
         await page.waitForTimeout(400);
-
-        await evaluateAndClick(() => {
-            const menus = [...document.querySelectorAll('[role="menu"]')];
-            const viewMenu = menus.find(m => m.innerText.includes("Mode d'affichage"));
-            const btn = [...(viewMenu?.querySelectorAll('button, [role="menuitemradio"]') || [])]
-                .find(o => o.innerText.trim() === 'Grille');
-            return btn || null;
-        });
-
     }
+
+    await page.waitForSelector('[data-testid="component-shelf"]', { timeout: 8000 });
+
+    ({ thisIs, radio } = await scrapeArtistThisIsAndRadio());
+
+    const seeAllClicked = await evaluateAndClick(() => {
+        const shelves = [...document.querySelectorAll('[data-testid="component-shelf"]')];
+        const discoShelf = shelves.find(s =>
+            s.querySelector('[data-testid="rich-title-row-shelf-header"]')?.innerText.startsWith('Discographie')
+        );
+        return discoShelf?.querySelector('[data-testid="see-all-link"]') || null;
+    });
+
+    if (!seeAllClicked) {
+        throw new Error("discography not found");
+    }
+
+    await page.waitForSelector(
+        '[data-testid="artist-page"] button[aria-controls="sort-and-view-picker"]',
+        { timeout: 8000 }
+    );
+
+    await page.locator(
+        '[data-testid="artist-page"] button[aria-controls="sort-and-view-picker"]'
+    ).click();
+
+    await page.waitForTimeout(400);
+
+    await evaluateAndClick(() => {
+        const menus = [...document.querySelectorAll('[role="menu"]')];
+        const viewMenu = menus.find(m => m.innerText.includes("Mode d'affichage"));
+        const btn = [...(viewMenu?.querySelectorAll('button, [role="menuitemradio"]') || [])]
+            .find(o => o.innerText.trim() === 'Grille');
+        return btn || null;
+    });
 
     await page.waitForSelector('[data-encore-id="card"]', { timeout: 8000 });
     await page.waitForTimeout(1000);
@@ -3600,6 +3620,36 @@ app.get("/playlist", async (req, res) => {
 
         if (!navigated) {
             navigated = await scrollWhatsNewAndRetryClick(() => tryClickAnywhere(id), direction);
+        }
+
+        // Last resort: step back one real browser-history entry and
+        // retry the click, instead of giving up. Needed for ids that
+        // were scraped from a page the shared browser has since moved
+        // away from - confirmed live 2026-09-17 with the artist page's
+        // "This Is X"/"Radio X" playlists (scrapeArtistThisIsAndRadio):
+        // by the time the user can tap one, /artist's own flow has
+        // already navigated forward into /discography/ to scrape the
+        // album grid, so the card is gone from the current DOM and every
+        // click attempt above fails - 100% of the time, not a rare race.
+        // A first attempt at this used page.goto() straight to the
+        // target URL - technically reaches it, but a goto is a real
+        // document navigation, and confirmed live that tears down
+        // whatever audio pipeline Chromium had running for the live
+        // relay, glitching actual playback. page.goBack() avoids the
+        // reload but is still a programmatic navigation call, subject to
+        // the same anti-automation risk page.reload() already burned
+        // this project once (see browserBackClick's own comment) -
+        // browserBackClick() is real trusted input instead, the same
+        // mouse-back-button dispatch /browser-back itself uses. The pre-
+        // discography artist page (where the card still exists) is
+        // exactly one entry back, since that's how this function always
+        // arrives wherever it currently is. Only ever attempted once; if
+        // the card still isn't findable from wherever this lands,
+        // that's a real 404, not something a second guess would fix.
+        if (!navigated) {
+            await browserBackClick();
+            await page.waitForTimeout(400);
+            navigated = await tryClickAnywhere(id);
         }
 
         if (!navigated) {

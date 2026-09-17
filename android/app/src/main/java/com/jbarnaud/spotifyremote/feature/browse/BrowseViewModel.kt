@@ -16,6 +16,7 @@ import com.jbarnaud.spotifyremote.state.LoadingIndicatorController
 import com.jbarnaud.spotifyremote.state.PlaybackStateRepository
 import com.jbarnaud.spotifyremote.state.QueueRefreshTrigger
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -265,8 +266,23 @@ class BrowseViewModel @Inject constructor(
 
     }
 
+    // Cancel-and-replace, not just "launch another": onResumed() can
+    // fire load() again while an earlier one is still running (confirmed
+    // live 2026-09-17 - a lifecycle bounce, e.g. the screen waking back
+    // up, mid-load is enough) and both hit the same server-side shared
+    // Playwright page. That was rare enough to go unnoticed while loads
+    // were a quick in-page click, but became a real, reproducible
+    // failure once /playlist started falling back to a several-second
+    // page.goto() for ids scraped from a page since navigated away from
+    // (see /playlist's own comment) - two concurrent goto()s on the same
+    // page raced each other into a timeout. Tracking the Job and
+    // cancelling it here means only the latest load() is ever actually
+    // in flight.
+    private var loadJob: Job? = null
+
     private fun load() {
-        viewModelScope.launch {
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
 
             _uiState.update { it.copy(isLoading = true, error = null) }
 
