@@ -3602,25 +3602,6 @@ app.get("/playlist", async (req, res) => {
             navigated = await scrollWhatsNewAndRetryClick(() => tryClickAnywhere(id), direction);
         }
 
-        // Last resort: navigate straight to the URL instead of hunting
-        // for a click target at all. Needed for ids that were scraped
-        // from a page the shared browser has since moved away from -
-        // confirmed live 2026-09-17 with the artist page's "This Is X"/
-        // "Radio X" playlists (scrapeArtistThisIsAndRadio): by the time
-        // the user can tap one, /artist's own flow has already navigated
-        // the page into /discography/ to scrape the album grid, so the
-        // card is long gone from the DOM and every click attempt above
-        // fails - 100% of the time, not a rare race. Same direct-goto
-        // pattern as /resolve-link. Real "Titres likés" has no href to
-        // click even when visible (see below), so it needs its own URL
-        // rather than the generic /playlist/<id> shape.
-        if (!navigated) {
-            const url = id === "collection:tracks"
-                ? "https://open.spotify.com/collection/tracks"
-                : `https://open.spotify.com/playlist/${id}`;
-            navigated = await page.goto(url, { waitUntil: "domcontentloaded" }).then(() => true).catch(() => false);
-        }
-
         if (!navigated) {
             return res.status(404).send("not found");
         }
