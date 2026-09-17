@@ -2622,49 +2622,58 @@ async function scrapeArtistDiscography(onFirstRender) {
     let thisIs = null;
     let radio = null;
 
-    // browser-back (see /browser-back) can land here already sitting on
-    // the discography/all sub-page from a previous visit - the shelf
-    // this function otherwise clicks through to reach that page doesn't
-    // exist there, so re-running those steps would just time out
-    // waiting for it. Skip straight to the grid wait in that case.
-    if (!page.url().includes("/discography/")) {
-
-        await page.waitForSelector('[data-testid="component-shelf"]', { timeout: 8000 });
-
-        ({ thisIs, radio } = await scrapeArtistThisIsAndRadio());
-
-        const seeAllClicked = await evaluateAndClick(() => {
-            const shelves = [...document.querySelectorAll('[data-testid="component-shelf"]')];
-            const discoShelf = shelves.find(s =>
-                s.querySelector('[data-testid="rich-title-row-shelf-header"]')?.innerText.startsWith('Discographie')
-            );
-            return discoShelf?.querySelector('[data-testid="see-all-link"]') || null;
-        });
-
-        if (!seeAllClicked) {
-            throw new Error("discography not found");
-        }
-
-        await page.waitForSelector(
-            '[data-testid="artist-page"] button[aria-controls="sort-and-view-picker"]',
-            { timeout: 8000 }
-        );
-
-        await page.locator(
-            '[data-testid="artist-page"] button[aria-controls="sort-and-view-picker"]'
-        ).click();
-
-        await page.waitForTimeout(400);
-
-        await evaluateAndClick(() => {
-            const menus = [...document.querySelectorAll('[role="menu"]')];
-            const viewMenu = menus.find(m => m.innerText.includes("Mode d'affichage"));
-            const btn = [...(viewMenu?.querySelectorAll('button, [role="menuitemradio"]') || [])]
-                .find(o => o.innerText.trim() === 'Grille');
-            return btn || null;
-        });
-
+    // The "Avec X" shelf thisIs/radio come from - and the Discographie
+    // shelf's own "Voir tout" link - only exist on the artist's plain
+    // page, never on /discography/ itself. Landing here already on
+    // /discography/ happens two ways: real browser-back (see
+    // /browser-back), and - confirmed live 2026-09-17 - simply calling
+    // this again while the shared page happens to still be sitting on
+    // this artist's own discography from an earlier visit (e.g.
+    // BrowseViewModel's onResumed() re-sync after a failed action
+    // elsewhere). The old code skipped straight to the grid wait for
+    // both cases, to avoid timing out waiting for a shelf that isn't
+    // there - but that silently threw away thisIs/radio every time.
+    // Navigating back up to the parent artist URL first means the exact
+    // same scrape-and-click-through below always runs against a page
+    // that actually has the shelf, instead of needing two code paths.
+    if (page.url().includes("/discography/")) {
+        await page.goto(page.url().split("/discography/")[0], { waitUntil: "domcontentloaded" });
     }
+
+    await page.waitForSelector('[data-testid="component-shelf"]', { timeout: 8000 });
+
+    ({ thisIs, radio } = await scrapeArtistThisIsAndRadio());
+
+    const seeAllClicked = await evaluateAndClick(() => {
+        const shelves = [...document.querySelectorAll('[data-testid="component-shelf"]')];
+        const discoShelf = shelves.find(s =>
+            s.querySelector('[data-testid="rich-title-row-shelf-header"]')?.innerText.startsWith('Discographie')
+        );
+        return discoShelf?.querySelector('[data-testid="see-all-link"]') || null;
+    });
+
+    if (!seeAllClicked) {
+        throw new Error("discography not found");
+    }
+
+    await page.waitForSelector(
+        '[data-testid="artist-page"] button[aria-controls="sort-and-view-picker"]',
+        { timeout: 8000 }
+    );
+
+    await page.locator(
+        '[data-testid="artist-page"] button[aria-controls="sort-and-view-picker"]'
+    ).click();
+
+    await page.waitForTimeout(400);
+
+    await evaluateAndClick(() => {
+        const menus = [...document.querySelectorAll('[role="menu"]')];
+        const viewMenu = menus.find(m => m.innerText.includes("Mode d'affichage"));
+        const btn = [...(viewMenu?.querySelectorAll('button, [role="menuitemradio"]') || [])]
+            .find(o => o.innerText.trim() === 'Grille');
+        return btn || null;
+    });
 
     await page.waitForSelector('[data-encore-id="card"]', { timeout: 8000 });
     await page.waitForTimeout(1000);
