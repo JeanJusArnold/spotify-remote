@@ -175,6 +175,17 @@ class BrowseViewModel @Inject constructor(
         }
     }
 
+    // long-press on an album/playlist row (see BrowseResultRow/
+    // SwipeToConfirmRow) - plays the whole context directly instead of
+    // navigating in and playing the first track by hand. /play-result
+    // already handles non-track ids exactly this way (confirmed live
+    // 2026-10-19: an album/playlist id resolves its own card's hover
+    // play button, same as a track row's), so this is just a second
+    // entry point into the existing playItem, not new server behavior.
+    fun onLongPress(item: BrowseItem, onPlayed: () -> Unit) {
+        if (item.type == "album" || item.type == "playlist") playItem(item.id, onPlayed)
+    }
+
     // matches the web client's playResult() exactly - it plays, then
     // closes the search overlay back to the player view (closeSearch())
     // rather than leaving the user sitting in the list they just tapped

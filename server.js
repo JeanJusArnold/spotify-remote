@@ -2123,6 +2123,24 @@ app.get("/play-result", requiresMprisUnblocked(async (req, res) => {
             clicked = await scrollWhatsNewAndRetryClick(() => tryClickPlayableElement(id), direction);
         }
 
+        // Last resort: step back one real browser-history entry and
+        // retry, instead of giving up - same fix and same reasoning as
+        // /playlist's own (see its comment): an album/playlist's id
+        // scraped from the artist page's "This Is X"/"Radio X" shelf
+        // (scrapeArtistThisIsAndRadio) stops being findable the instant
+        // /artist's own flow navigates forward into /discography/ to
+        // scrape the album grid - confirmed live 2026-10-19 via the new
+        // long-press-to-play feature, same 404 shape, same fix.
+        // browserBackClick() (real trusted mouse-back-button input, not
+        // page.goBack()/reload() - see its own comment) is the vetted
+        // way to navigate backward on this page without risking the
+        // anti-automation lockdown those triggered before.
+        if (!clicked) {
+            await browserBackClick();
+            await page.waitForTimeout(400);
+            clicked = await tryClickPlayableElement(id);
+        }
+
         if (!clicked) {
             // Silent from the client's perspective otherwise: the
             // buffering overlay it shows on tap (AudioBufferingTrigger)

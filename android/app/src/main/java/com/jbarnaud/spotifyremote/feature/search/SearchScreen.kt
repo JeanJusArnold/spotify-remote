@@ -346,6 +346,7 @@ fun SearchResultsScreen(
             onHomeSectionToggle = {},
             onLoadMore = {},
             onAddToQueue = viewModel::addToQueue,
+            onLongPress = { viewModel.onLongPress(it, onPlayed) },
             modifier = Modifier.fillMaxSize().padding(top = 8.dp)
         )
 

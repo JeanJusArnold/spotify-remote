@@ -119,6 +119,7 @@ fun BrowseScreen(
             onHomeSectionToggle = viewModel::onHomeSectionToggle,
             onLoadMore = viewModel::loadMore,
             onAddToQueue = viewModel::addToQueue,
+            onLongPress = { viewModel.onLongPress(it, onPlayed) },
             modifier = Modifier.weight(1f)
         )
 

@@ -61,8 +61,20 @@ private val BrowsableTypes = setOf("artist", "album", "playlist", "folder")
 // proved unreliable on a real device (left touch input broken elsewhere
 // on the screen after being dismissed via its own item, not reproducible
 // through adb-driven synthetic touches to debug further).
+// album/playlist only - long-press plays the whole context directly
+// (see SwipeToConfirmRow's own comment), the native equivalent of the
+// Web Player's hover-card play overlay. artist/folder stay plain taps
+// only - "play the whole thing" isn't a single unambiguous action for
+// either of those.
+private val DirectlyPlayableTypes = setOf("album", "playlist")
+
 @Composable
-fun BrowseResultRow(item: BrowseItem, onClick: () -> Unit, onAddToQueue: suspend (String) -> Boolean) {
+fun BrowseResultRow(
+    item: BrowseItem,
+    onClick: () -> Unit,
+    onAddToQueue: suspend (String) -> Boolean,
+    onLongPress: (() -> Unit)? = null
+) {
 
     val scope = rememberCoroutineScope()
     val queueable = item.type !in BrowsableTypes
@@ -72,6 +84,7 @@ fun BrowseResultRow(item: BrowseItem, onClick: () -> Unit, onAddToQueue: suspend
         swipeEnabled = queueable,
         label = "Ajouter",
         onConfirm = { scope.launch { onAddToQueue(item.id) } },
+        onLongClick = onLongPress?.takeIf { item.type in DirectlyPlayableTypes },
         coverSize = 48.dp,
         modifier = Modifier.fillMaxWidth(),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
@@ -142,6 +155,7 @@ fun BrowseResultsList(
     onHomeSectionToggle: (Int) -> Unit,
     onLoadMore: () -> Unit,
     onAddToQueue: suspend (String) -> Boolean,
+    onLongPress: (BrowseItem) -> Unit,
     modifier: Modifier = Modifier
 ) {
 
@@ -210,7 +224,8 @@ fun BrowseResultsList(
                                 BrowseResultRow(
                                     item.copy(meta = null),
                                     onClick = { onItemClick(item) },
-                                    onAddToQueue = onAddToQueue
+                                    onAddToQueue = onAddToQueue,
+                                    onLongPress = { onLongPress(item) }
                                 )
                             }
                         }
@@ -227,18 +242,18 @@ fun BrowseResultsList(
         else -> LazyColumn(modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
 
             items(listOfNotNull(state.thisIs, state.radio), key = { it.id }) { item ->
-                BrowseResultRow(item, onClick = { onItemClick(item) }, onAddToQueue = onAddToQueue)
+                BrowseResultRow(item, onClick = { onItemClick(item) }, onAddToQueue = onAddToQueue, onLongPress = { onLongPress(item) })
             }
 
             items(state.items, key = { it.id }) { item ->
-                BrowseResultRow(item, onClick = { onItemClick(item) }, onAddToQueue = onAddToQueue)
+                BrowseResultRow(item, onClick = { onItemClick(item) }, onAddToQueue = onAddToQueue, onLongPress = { onLongPress(item) })
             }
 
             if (state.singles.isNotEmpty()) {
                 item {
                     var expanded by remember { mutableStateOf(false) }
                     CollapsibleSection("Singles", expanded, onToggle = { expanded = !expanded }) {
-                        Column { state.singles.forEach { BrowseResultRow(it, onClick = { onItemClick(it) }, onAddToQueue = onAddToQueue) } }
+                        Column { state.singles.forEach { BrowseResultRow(it, onClick = { onItemClick(it) }, onAddToQueue = onAddToQueue, onLongPress = { onLongPress(it) }) } }
                     }
                 }
             }
@@ -247,7 +262,7 @@ fun BrowseResultsList(
                 item {
                     var expanded by remember { mutableStateOf(false) }
                     CollapsibleSection("Compilations", expanded, onToggle = { expanded = !expanded }) {
-                        Column { state.compilations.forEach { BrowseResultRow(it, onClick = { onItemClick(it) }, onAddToQueue = onAddToQueue) } }
+                        Column { state.compilations.forEach { BrowseResultRow(it, onClick = { onItemClick(it) }, onAddToQueue = onAddToQueue, onLongPress = { onLongPress(it) }) } }
                     }
                 }
             }

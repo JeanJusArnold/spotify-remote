@@ -4,6 +4,8 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
@@ -53,12 +55,27 @@ import kotlinx.coroutines.launch
 // SwipeCommitDistance and you let go.
 private val SwipeCommitDistance: Dp = 160.dp
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SwipeToConfirmRow(
     onClick: () -> Unit,
     swipeEnabled: Boolean,
     label: String,
     onConfirm: () -> Unit,
+    // album/playlist rows only (see BrowseResultRow) - plays the whole
+    // context directly, the same action as hovering its card on the Web
+    // Player and clicking the round overlay play button that appears,
+    // instead of navigating in and playing the first track by hand.
+    // null (the default, used everywhere else) leaves the row a plain
+    // clickable with no long-press affordance at all - not swapped in
+    // unconditionally, so this never touches rows where it doesn't
+    // apply. No popup/menu involved on long-press, deliberately: the
+    // previous long-press interaction this replaced (see this file's own
+    // top comment) broke touch elsewhere on screen after a Popup was
+    // dismissed - a direct action with no popup to dismiss doesn't hit
+    // that same failure shape, but test on a real device regardless,
+    // that bug never reproduced through adb-driven synthetic touches.
+    onLongClick: (() -> Unit)? = null,
     // matches the row's own cover art size - the overlay's whole point
     // is to read as "big," so it's sized off something already known to
     // look right in that row rather than a fixed guess (48dp read as too
@@ -86,7 +103,10 @@ fun SwipeToConfirmRow(
         Row(
             Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onClick)
+                .let { base ->
+                    if (onLongClick != null) base.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                    else base.clickable(onClick = onClick)
+                }
                 .let { rowModifier ->
                     if (!swipeEnabled) rowModifier else rowModifier.draggable(
                         state = rememberDraggableState { delta ->

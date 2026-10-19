@@ -143,6 +143,11 @@ class SearchViewModel @Inject constructor(
         }
     }
 
+    // see BrowseViewModel.onLongPress's own comment
+    fun onLongPress(item: BrowseItem, onPlayed: () -> Unit) {
+        if (item.type == "album" || item.type == "playlist") playItem(item.id, onPlayed)
+    }
+
     private fun playItem(id: String, onPlayed: () -> Unit) {
         audioBufferingTrigger.notifyTrackChangeRequested()
         viewModelScope.launch {
