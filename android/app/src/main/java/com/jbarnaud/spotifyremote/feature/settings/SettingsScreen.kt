@@ -129,6 +129,12 @@ fun SettingsScreen(
                                 "répertorie les différentes sections du menu d'accueil, depuis " +
                                 "n'importe quel écran."
                         )
+                        HiddenFeature(
+                            title = "Lecture directe d'un album/playlist",
+                            description = "Appui long sur un album ou une playlist (recherche, " +
+                                "accueil, bibliothèque, discographie) : lance directement sa " +
+                                "lecture depuis le premier titre, sans l'ouvrir d'abord."
+                        )
                     }
                 }
             }
